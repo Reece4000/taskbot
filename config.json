@@ -1,0 +1,100 @@
+{
+  "task_file": "_taskbot/_tasks.md",
+  "state_dir": "_taskbot/state",
+  "artifact_dir": "_taskbot/artifacts",
+  "control_dir": "_taskbot/control",
+  "store": {
+    "path": "_taskbot/tasks.yaml",
+    "phases": [
+      "backlog",
+      "planning",
+      "ready",
+      "in_progress",
+      "needs_testing",
+      "blocked",
+      "completed"
+    ],
+    "runner_pick_phases": [
+      "ready",
+      "backlog"
+    ],
+    "default_board": "General"
+  },
+  "models": {
+    "planner": "gpt-5.4",
+    "implementer": "gpt-5.4-mini",
+    "reviewer": "gpt-5.4-mini"
+  },
+  "codex": {
+    "sandbox": "workspace-write",
+    "ask_for_approval": "never",
+    "color": "never",
+    "ephemeral": true,
+    "skip_git_repo_check": true,
+    "allow_subagents": true,
+    "stream_output": true,
+    "stream_commands": true,
+    "stream_stderr": false,
+    "stream_ansi": "auto"
+  },
+  "context": {
+    "scan_roots": [
+      "."
+    ],
+    "include_extensions": [
+      ".cpp",
+      ".h",
+      ".hpp",
+      ".qml",
+      ".json",
+      ".md",
+      ".py",
+      ".txt",
+      ".cmake"
+    ],
+    "exclude_paths": [
+      ".git",
+      ".hg",
+      ".svn",
+      ".venv",
+      "venv",
+      "node_modules",
+      "dist",
+      "build",
+      "coverage",
+      "__pycache__",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".next",
+      ".turbo",
+      "_taskbot/artifacts",
+      "_taskbot/state",
+      "_taskbot/control",
+      "_taskbot/tasks.yaml",
+      "_taskbot/_tasks.md",
+      "_taskbot/README.md",
+      "_taskbot/__pycache__",
+      "_taskbot/taskbot/__pycache__"
+    ],
+    "max_file_size_bytes": 180000,
+    "max_symbols_per_file": 8,
+    "plan_file_limit": 12,
+    "implementation_file_limit": 16,
+    "max_history_items": 2
+  },
+  "selection": {
+    "include_needs_testing": false
+  },
+  "loop": {
+    "default_iterations": 1,
+    "sleep_seconds": 2.0
+  },
+  "ui": {
+    "refresh_seconds": 1.0,
+    "terminal_log": "_taskbot/control/terminal.log",
+    "terminal_tail_lines": 250
+  },
+  "verification": {
+    "commands": []
+  }
+}

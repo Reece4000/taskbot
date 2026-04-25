@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "status",
+    "summary",
+    "files_touched",
+    "tests_run",
+    "follow_up_items",
+    "mark_task_as"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "needs_testing",
+        "blocked",
+        "retry"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "files_touched": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tests_run": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "follow_up_items": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mark_task_as": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "needs_testing",
+        "leave_unchanged"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

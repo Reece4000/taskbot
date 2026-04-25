@@ -13,10 +13,11 @@ from taskbot.store import (
     StoredTask,
     create_board,
     create_task,
+    edit_task,
     ensure_task_store,
-    list_boards,
     load_store_snapshot,
     phase_labels,
+    store_path,
 )
 from taskbot.terminal_stream import terminal_log_path
 
@@ -101,16 +102,40 @@ def _ansi_text_to_html(text: str, font_family: str) -> str:
     append_segment(text[position:])
     return (
         '<html><body style="margin:0; background:#14191e;">'
-        '<pre style="margin:0; white-space:pre-wrap; '
+        '<pre style="margin:0; white-space:pre; '
         'font-family:\'{0}\'; font-size:11pt; color:#d7e0ea;">{1}</pre>'
         "</body></html>"
     ).format(html.escape(font_family, quote=True), "".join(parts))
 
 
+def _path_signature(path: Path) -> tuple[bool, int, int]:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return (False, 0, 0)
+    return (True, stat_result.st_mtime_ns, stat_result.st_size)
+
+
+def _boards_from_store_snapshot(store: Dict[str, Any]) -> List[Dict[str, Any]]:
+    boards: List[Dict[str, Any]] = []
+    for payload in store.get("boards", []):
+        if not isinstance(payload, dict):
+            continue
+        boards.append(
+            {
+                "board_id": str(payload.get("board_id", "")),
+                "title": str(payload.get("title", "")),
+                "order": int(payload.get("order", 0) or 0),
+            }
+        )
+    boards.sort(key=lambda board: (board["order"], board["title"].lower()))
+    return boards
+
+
 def launch_ui(config: Dict[str, Any]) -> int:
     try:
         from PySide6.QtCore import QTimer, Qt
-        from PySide6.QtGui import QFont, QFontDatabase
+        from PySide6.QtGui import QFont, QFontDatabase, QTextCursor
         from PySide6.QtWidgets import (
             QApplication,
             QComboBox,
@@ -332,8 +357,119 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def context_notes(self) -> str:
             return self.context_input.toPlainText().strip()
 
+    class EditTaskDialog(QDialog):
+        def __init__(self,
+                     task: StoredTask,
+                     board_titles: List[str],
+                     phases: List[str],
+                     parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.task = task
+            self.setWindowTitle("Edit Task")
+            self.setModal(True)
+            self.resize(560, 380)
+
+            available_boards = list(board_titles)
+            if task.board_title and task.board_title not in available_boards:
+                available_boards.append(task.board_title)
+            if not available_boards:
+                available_boards.append("General")
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(24, 24, 24, 24)
+            layout.setSpacing(14)
+
+            title = QLabel("Edit Task")
+            title.setObjectName("DialogTitle")
+            layout.addWidget(title)
+
+            caption_text = "Update the board, phase, title, or notes for this task."
+            if task.source_kind != "ui":
+                caption_text = (
+                    "This task is synced from markdown. Store edits may be overridden if the markdown source changes."
+                )
+            caption = QLabel(caption_text)
+            caption.setObjectName("DialogCaption")
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
+
+            board_label = QLabel("Board")
+            board_label.setObjectName("FieldLabel")
+            layout.addWidget(board_label)
+
+            self.board_combo = QComboBox()
+            self.board_combo.addItems(available_boards)
+            self.board_combo.setEditable(True)
+            self.board_combo.setCurrentText(task.board_title)
+            layout.addWidget(self.board_combo)
+
+            phase_label = QLabel("Phase")
+            phase_label.setObjectName("FieldLabel")
+            layout.addWidget(phase_label)
+
+            self.phase_combo = QComboBox()
+            for phase in phases:
+                self.phase_combo.addItem(PHASE_TITLES.get(phase, phase), phase)
+            phase_index = max(0, self.phase_combo.findData(task.phase))
+            self.phase_combo.setCurrentIndex(phase_index)
+            layout.addWidget(self.phase_combo)
+
+            task_label = QLabel("Title")
+            task_label.setObjectName("FieldLabel")
+            layout.addWidget(task_label)
+
+            self.title_input = QLineEdit()
+            self.title_input.setPlaceholderText("What needs to be done?")
+            self.title_input.setText(task.title)
+            layout.addWidget(self.title_input)
+
+            context_label = QLabel("Context")
+            context_label.setObjectName("FieldLabel")
+            layout.addWidget(context_label)
+
+            self.context_input = QPlainTextEdit()
+            self.context_input.setPlaceholderText("Any constraints, notes, or acceptance details.")
+            self.context_input.setFixedHeight(130)
+            self.context_input.setPlainText(task.context_notes)
+            layout.addWidget(self.context_input)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            layout.addWidget(buttons)
+
+            self.title_input.selectAll()
+            self.title_input.setFocus()
+
+        def accept(self) -> None:
+            if not self.task_title():
+                QMessageBox.warning(self, "Task Title Required", "Enter a task title.")
+                self.title_input.setFocus()
+                return
+            if not self.board_title():
+                QMessageBox.warning(self, "Board Required", "Choose or enter a board.")
+                self.board_combo.setFocus()
+                return
+            if not self.phase_value():
+                QMessageBox.warning(self, "Phase Required", "Choose a workflow phase.")
+                self.phase_combo.setFocus()
+                return
+            super().accept()
+
+        def board_title(self) -> str:
+            return self.board_combo.currentText().strip()
+
+        def phase_value(self) -> str:
+            return str(self.phase_combo.currentData() or "").strip()
+
+        def task_title(self) -> str:
+            return self.title_input.text().strip()
+
+        def context_notes(self) -> str:
+            return self.context_input.toPlainText().strip()
+
     class TaskCard(QFrame):
-        def __init__(self, task: StoredTask, *, show_board: bool) -> None:
+        def __init__(self, task: StoredTask, *, show_board: bool, on_edit: Any) -> None:
             super().__init__()
             self.setObjectName("TaskCard")
 
@@ -341,10 +477,23 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.setContentsMargins(14, 12, 14, 12)
             layout.setSpacing(7)
 
+            top_row = QHBoxLayout()
+            top_row.setContentsMargins(0, 0, 0, 0)
+            top_row.setSpacing(8)
+
             if show_board:
                 board_badge = QLabel(task.board_title)
                 board_badge.setObjectName("BoardBadge")
-                layout.addWidget(board_badge, 0, Qt.AlignLeft)
+                top_row.addWidget(board_badge, 0, Qt.AlignLeft)
+
+            top_row.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
+
+            edit_button = QToolButton()
+            edit_button.setText("Edit")
+            edit_button.setObjectName("CardActionButton")
+            edit_button.clicked.connect(on_edit)
+            top_row.addWidget(edit_button)
+            layout.addLayout(top_row)
 
             title = QLabel(task.title)
             title.setObjectName("TaskTitle")
@@ -409,7 +558,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.addLayout(self.body_layout)
             layout.addStretch(1)
 
-        def set_tasks(self, tasks: List[StoredTask], *, show_board: bool) -> None:
+        def set_tasks(self, tasks: List[StoredTask], *, show_board: bool, on_edit_task: Any) -> None:
             self.count_label.setText(str(len(tasks)))
             while self.body_layout.count():
                 item = self.body_layout.takeAt(0)
@@ -424,7 +573,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
 
             for task in tasks:
-                self.body_layout.addWidget(TaskCard(task, show_board=show_board))
+                self.body_layout.addWidget(
+                    TaskCard(
+                        task,
+                        show_board=show_board,
+                        on_edit=lambda _checked=False, current_task=task: on_edit_task(current_task),
+                    )
+                )
 
             self.body_layout.addStretch(1)
 
@@ -434,6 +589,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.saved_session = _load_saved_session()
             self.status_note = "Ready"
             self._last_terminal_text = ""
+            self._store_signature: tuple[bool, int, int] | None = None
+            self._runtime_signature: tuple[bool, int, int] | None = None
+            self._terminal_signature: tuple[bool, int, int] | None = None
+            self._cached_boards: List[Dict[str, Any]] = []
+            self._cached_tasks: List[StoredTask] = []
+            self._cached_runtime_payload: Dict[str, Any] = {}
+            self._last_rendered_selected_board_id: str | None | object = object()
             self.active_config = self._initial_config()
             self.selected_board_id = self._initial_board_id()
             self.terminal_font_family = _preferred_monospace_family()
@@ -546,6 +708,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.runtime_label = QLabel("")
             self.runtime_label.setObjectName("RuntimeLabel")
+            self.runtime_label.setTextFormat(Qt.RichText)
             self.runtime_label.setWordWrap(False)
             self.runtime_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             controls_row.addWidget(self.runtime_label, 1)
@@ -644,13 +807,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.columns_scroll.setObjectName("ColumnsScroll")
             self.columns_scroll.setWidgetResizable(True)
             self.columns_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            self.columns_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.columns_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.columns_scroll.viewport().setObjectName("ColumnsViewport")
 
             self.columns_container = QWidget()
             self.columns_container.setObjectName("ColumnsContainer")
             self.columns_container_layout = QHBoxLayout(self.columns_container)
-            self.columns_container_layout.setContentsMargins(14, 14, 14, 32)
+            self.columns_container_layout.setContentsMargins(14, 14, 14, 28)
             self.columns_container_layout.setSpacing(10)
             self.columns_scroll.setWidget(self.columns_container)
 
@@ -700,6 +863,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.terminal_output.setObjectName("TerminalOutput")
             self.terminal_output.setReadOnly(True)
             self.terminal_output.setLineWrapMode(QTextEdit.NoWrap)
+            self.terminal_output.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.terminal_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             terminal_font = QFont(self.terminal_font_family)
             terminal_font.setStyleHint(QFont.Monospace)
             terminal_font.setPointSize(11)
@@ -715,6 +880,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.main_splitter.setStretchFactor(0, 1)
             self.main_splitter.setStretchFactor(1, 0)
             self.main_splitter.setSizes([760, 220])
+            self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
             root.addWidget(self.main_splitter, 1)
 
         def _apply_window_style(self) -> None:
@@ -903,21 +1069,21 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QScrollBar#StageScrollBar:horizontal {
-                background: rgba(244, 236, 226, 0.92);
-                height: 18px;
+                background: rgba(243, 236, 226, 0.78);
+                height: 14px;
                 margin: 0;
-                border: 1px solid rgba(119, 96, 80, 0.18);
-                border-radius: 4px;
+                border: 1px solid rgba(119, 96, 80, 0.12);
+                border-radius: 3px;
             }
 
             QScrollBar#StageScrollBar::handle:horizontal {
-                background: rgba(77, 62, 51, 0.34);
-                min-width: 84px;
-                border-radius: 4px;
+                background: rgba(77, 62, 51, 0.25);
+                min-width: 72px;
+                border-radius: 3px;
             }
 
             QScrollBar#StageScrollBar::handle:horizontal:hover {
-                background: rgba(77, 62, 51, 0.46);
+                background: rgba(77, 62, 51, 0.36);
             }
 
             QScrollBar#StageScrollBar::add-line:horizontal,
@@ -968,6 +1134,21 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 background: #ffffff;
                 border: 1px solid #eadfce;
                 border-radius: 5px;
+            }
+
+            QToolButton#CardActionButton {
+                background: #f6eee3;
+                color: #6f5548;
+                border: 1px solid #dfcfbd;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+
+            QToolButton#CardActionButton:hover {
+                background: #efe4d7;
+                color: #46362d;
             }
 
             QLabel#BoardBadge {
@@ -1021,6 +1202,30 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 border: 1px solid #273341;
                 border-radius: 4px;
                 padding: 10px;
+            }
+
+            QTextEdit#TerminalOutput QScrollBar:vertical {
+                background: rgba(23, 29, 34, 0.24);
+                width: 12px;
+                margin: 3px 2px 3px 2px;
+            }
+
+            QTextEdit#TerminalOutput QScrollBar::handle:vertical {
+                background: rgba(128, 145, 160, 0.58);
+                min-height: 42px;
+                border-radius: 4px;
+            }
+
+            QTextEdit#TerminalOutput QScrollBar:horizontal {
+                background: rgba(23, 29, 34, 0.24);
+                height: 12px;
+                margin: 2px 3px 2px 3px;
+            }
+
+            QTextEdit#TerminalOutput QScrollBar::handle:horizontal {
+                background: rgba(128, 145, 160, 0.58);
+                min-width: 42px;
+                border-radius: 4px;
             }
 
             QScrollBar:vertical {
@@ -1080,6 +1285,57 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _refresh_repo_widgets(self) -> None:
             self.repo_input.setText(str(self.active_config["repo_root"]))
 
+        def _invalidate_refresh_cache(self) -> None:
+            self._store_signature = None
+            self._runtime_signature = None
+            self._terminal_signature = None
+            self._cached_boards = []
+            self._cached_tasks = []
+            self._cached_runtime_payload = {}
+            self._last_terminal_text = ""
+            self._last_rendered_selected_board_id = object()
+
+        def _refresh_store_cache(self) -> bool:
+            current_signature = _path_signature(store_path(self.active_config))
+            if current_signature == self._store_signature:
+                return False
+
+            store = load_store_snapshot(self.active_config)
+            self._cached_boards = _boards_from_store_snapshot(store)
+            self._cached_tasks = [
+                StoredTask.from_payload(payload)
+                for payload in store.get("tasks", [])
+                if isinstance(payload, dict)
+            ]
+            self._cached_tasks.sort(key=lambda task: (task.board_title.lower(), task.order, task.title.lower()))
+            self._store_signature = _path_signature(store_path(self.active_config))
+            return True
+
+        def _refresh_runtime_cache(self) -> bool:
+            current_signature = _path_signature(self._runtime_path())
+            if current_signature == self._runtime_signature:
+                return False
+
+            self._runtime_signature = current_signature
+            self._cached_runtime_payload = self._read_runtime_payload() if current_signature[0] else {}
+            return True
+
+        def _capture_scroll_state(self, widget: Any) -> tuple[int, int]:
+            return (
+                widget.verticalScrollBar().value(),
+                widget.horizontalScrollBar().value(),
+            )
+
+        def _restore_scroll_state(self, widget: Any, vertical_value: int, horizontal_value: int) -> None:
+            vertical_scrollbar = widget.verticalScrollBar()
+            horizontal_scrollbar = widget.horizontalScrollBar()
+            vertical_scrollbar.setValue(min(vertical_value, vertical_scrollbar.maximum()))
+            horizontal_scrollbar.setValue(min(horizontal_value, horizontal_scrollbar.maximum()))
+
+        def _restore_columns_scroll_state(self, vertical_value: int, horizontal_value: int) -> None:
+            self._restore_scroll_state(self.columns_scroll, vertical_value, horizontal_value)
+            self._sync_stage_scrollbar()
+
         def _rebuild_phase_columns(self, phases: List[str]) -> None:
             self.phase_order = list(phases)
             self.phase_columns = {}
@@ -1101,15 +1357,18 @@ def launch_ui(config: Dict[str, Any]) -> int:
             super().resizeEvent(event)
             self._sync_stage_scrollbar()
 
+        def _on_main_splitter_moved(self, _position: int, _index: int) -> None:
+            QTimer.singleShot(0, self._sync_stage_scrollbar)
+
         def _position_stage_scrollbar(self) -> None:
             scroll_geometry = self.columns_scroll.geometry()
             if scroll_geometry.width() <= 0 or scroll_geometry.height() <= 0:
                 return
-            inset_x = 14
-            scrollbar_height = 18
+            inset_x = 10
+            scrollbar_height = 14
             x = scroll_geometry.x() + inset_x
             width = max(96, scroll_geometry.width() - (inset_x * 2))
-            y = scroll_geometry.y() + scroll_geometry.height() - scrollbar_height - 10
+            y = self.stage_shell.height() - scrollbar_height - 8
             self.stage_scrollbar.setGeometry(x, y, width, scrollbar_height)
             self.stage_scrollbar.raise_()
 
@@ -1154,7 +1413,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             return item.data(Qt.UserRole + 1)
 
         def _available_board_titles(self) -> List[str]:
-            return [board["title"] for board in list_boards(self.active_config)]
+            self._refresh_store_cache()
+            return [board["title"] for board in self._cached_boards]
 
         def _browse_repo(self) -> None:
             selected = QFileDialog.getExistingDirectory(
@@ -1190,7 +1450,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.selected_board_id = None
             self.status_note = "Loaded repo {0}".format(repo_root.name)
-            self._last_terminal_text = ""
+            self._invalidate_refresh_cache()
             self._refresh_repo_widgets()
             _save_session(repo_root, self.selected_board_id)
             self.refresh_view()
@@ -1229,6 +1489,35 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             self.selected_board_id = task.board_id
             self.status_note = "Added task {0}".format(task.task_id)
+            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self.refresh_view()
+
+        def _open_edit_task_dialog(self, task: StoredTask) -> None:
+            dialog = EditTaskDialog(
+                task,
+                self._available_board_titles(),
+                self.phase_order,
+                self,
+            )
+            if dialog.exec() != QDialog.Accepted:
+                return
+            try:
+                updated = edit_task(
+                    self.active_config,
+                    task.task_id,
+                    board_title=dialog.board_title(),
+                    title=dialog.task_title(),
+                    context_notes=dialog.context_notes(),
+                    phase=dialog.phase_value(),
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Update Task", str(exc))
+                return
+            if updated is None:
+                QMessageBox.critical(self, "Failed To Update Task", "Task could not be found.")
+                return
+            self.selected_board_id = updated.board_id
+            self.status_note = "Updated task {0}".format(updated.task_id)
             _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
             self.refresh_view()
 
@@ -1279,14 +1568,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
                                   tasks: List[StoredTask],
                                   runtime_payload: Dict[str, Any]) -> None:
             runner_phase = str(runtime_payload.get("phase", "idle")).strip() or "idle"
-            note = self.status_note
+            stop_requested = self._stop_path().exists() or self.status_note.lower() == "stop requested"
+            note_html = html.escape(self.status_note)
+            if stop_requested:
+                note_html = '<span style="color:#a13e35; font-weight:700;">Stop Requested</span>'
             self.status_chip.setText(runner_phase.upper())
             self.runtime_label.setText(
-                "Config: {0}  •  Boards: {1}  •  Tasks: {2}  •  Note: {3}".format(
-                    self._config_path_label(),
+                "Config: {0}  &bull;  Boards: {1}  &bull;  Tasks: {2}  &bull;  Note: {3}".format(
+                    html.escape(self._config_path_label()),
                     len(boards),
                     len(tasks),
-                    note,
+                    note_html,
                 )
             )
 
@@ -1296,6 +1588,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 counts[task.board_id] = counts.get(task.board_id, 0) + 1
 
             selected_board_id = self.selected_board_id
+            vertical_value, horizontal_value = self._capture_scroll_state(self.board_list)
             self.board_list.blockSignals(True)
             self.board_list.clear()
 
@@ -1321,6 +1614,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.selected_board_id = None
             self.board_list.setCurrentRow(selected_row)
             self.board_list.blockSignals(False)
+            QTimer.singleShot(
+                0,
+                lambda: self._restore_scroll_state(
+                    self.board_list,
+                    vertical_value,
+                    horizontal_value,
+                ),
+            )
 
         def _update_board_header(self, tasks: List[StoredTask], boards: List[Dict[str, Any]]) -> None:
             selected_title = self._selected_board_title()
@@ -1344,6 +1645,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def _refresh_columns(self, tasks: List[StoredTask]) -> None:
             selected_board_id = self.selected_board_id
+            vertical_value, horizontal_value = self._capture_scroll_state(self.columns_scroll)
             visible_tasks = tasks
             if selected_board_id:
                 visible_tasks = [task for task in tasks if task.board_id == selected_board_id]
@@ -1351,43 +1653,83 @@ def launch_ui(config: Dict[str, Any]) -> int:
             show_board = selected_board_id is None
             for phase in self.phase_order:
                 phase_tasks = [task for task in visible_tasks if task.phase == phase]
-                self.phase_columns[phase].set_tasks(phase_tasks, show_board=show_board)
+                self.phase_columns[phase].set_tasks(
+                    phase_tasks,
+                    show_board=show_board,
+                    on_edit_task=self._open_edit_task_dialog,
+                )
+            QTimer.singleShot(
+                0,
+                lambda: self._restore_columns_scroll_state(
+                    vertical_value,
+                    horizontal_value,
+                ),
+            )
 
         def _refresh_terminal(self) -> None:
             path = terminal_log_path(self.active_config)
-            if not path.exists():
+            current_signature = _path_signature(path)
+            if current_signature == self._terminal_signature:
+                return
+
+            self._terminal_signature = current_signature
+            if not current_signature[0]:
                 text = ""
             else:
                 text = "\n".join(path.read_text(encoding="utf-8", errors="ignore").splitlines()[-tail_lines:])
             if text == self._last_terminal_text:
                 return
 
-            scroll_bar = self.terminal_output.verticalScrollBar()
-            at_bottom = scroll_bar.value() >= max(0, scroll_bar.maximum() - 8)
+            vertical_scrollbar = self.terminal_output.verticalScrollBar()
+            horizontal_scrollbar = self.terminal_output.horizontalScrollBar()
+            follow_tail = vertical_scrollbar.value() >= max(0, vertical_scrollbar.maximum() - 8)
+            vertical_value = vertical_scrollbar.value()
+            horizontal_value = horizontal_scrollbar.value()
             self._last_terminal_text = text
             self.terminal_output.setHtml(_ansi_text_to_html(text, self.terminal_font_family))
-            if at_bottom:
-                scroll_bar.setValue(scroll_bar.maximum())
+            QTimer.singleShot(
+                0,
+                lambda: self._restore_terminal_viewport(
+                    follow_tail,
+                    vertical_value,
+                    horizontal_value,
+                ),
+            )
+
+        def _restore_terminal_viewport(self,
+                                       follow_tail: bool,
+                                       vertical_value: int,
+                                       horizontal_value: int) -> None:
+            vertical_scrollbar = self.terminal_output.verticalScrollBar()
+            horizontal_scrollbar = self.terminal_output.horizontalScrollBar()
+            if follow_tail:
+                self.terminal_output.moveCursor(QTextCursor.End)
+                vertical_scrollbar.setValue(vertical_scrollbar.maximum())
+            else:
+                vertical_scrollbar.setValue(min(vertical_value, vertical_scrollbar.maximum()))
+            horizontal_scrollbar.setValue(min(horizontal_value, horizontal_scrollbar.maximum()))
 
         def refresh_view(self) -> None:
-            store = load_store_snapshot(self.active_config)
-            boards = list_boards(self.active_config)
-            tasks = [
-                StoredTask.from_payload(payload)
-                for payload in store.get("tasks", [])
-                if isinstance(payload, dict)
-            ]
-            tasks.sort(key=lambda task: (task.board_title.lower(), task.order, task.title.lower()))
+            store_changed = self._refresh_store_cache()
+            self._refresh_runtime_cache()
 
-            runtime_payload = self._read_runtime_payload()
+            boards = self._cached_boards
+            tasks = self._cached_tasks
+            runtime_payload = self._cached_runtime_payload
             self._update_status_header(boards, tasks, runtime_payload)
-            self._populate_board_list(boards, tasks)
-            self._update_board_header(tasks if self.selected_board_id is None else [
-                task for task in tasks if task.board_id == self.selected_board_id
-            ], boards)
-            self._refresh_columns(tasks)
+            if store_changed:
+                self._populate_board_list(boards, tasks)
+
+            selection_changed = self.selected_board_id != self._last_rendered_selected_board_id
+            if store_changed or selection_changed:
+                self._update_board_header(tasks if self.selected_board_id is None else [
+                    task for task in tasks if task.board_id == self.selected_board_id
+                ], boards)
+                self._refresh_columns(tasks)
+                self._last_rendered_selected_board_id = self.selected_board_id
+                QTimer.singleShot(0, self._sync_stage_scrollbar)
+
             self._refresh_terminal()
-            QTimer.singleShot(0, self._sync_stage_scrollbar)
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")

@@ -500,6 +500,48 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
     return created
 
 
+def edit_task(config: Dict[str, Any],
+              task_id: str,
+              *,
+              board_title: str,
+              title: str,
+              context_notes: str,
+              phase: str) -> Optional[StoredTask]:
+    updated: Optional[StoredTask] = None
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal updated
+        cleaned_board = board_title.strip() or str(config.get("store", {}).get("default_board", "General"))
+        cleaned_title = title.strip()
+        cleaned_phase = phase.strip()
+        if not cleaned_title:
+            raise ValueError("task title cannot be empty")
+        if cleaned_phase not in phase_labels(config):
+            raise ValueError("invalid task phase: {0}".format(cleaned_phase))
+
+        for payload in store.get("tasks", []):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("task_id", "")) != task_id:
+                continue
+
+            board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
+            payload["board_id"] = board_id
+            payload["board_title"] = cleaned_board
+            payload["title"] = cleaned_title
+            payload["context_notes"] = context_notes.strip()
+            payload["phase"] = cleaned_phase
+            payload["updated_at"] = _now_iso()
+            updated = StoredTask.from_payload(payload)
+            break
+
+    _mutate_store(config, mutate, sync_markdown=True)
+
+    if updated and updated.source_kind == "markdown" and phase in ("completed", "needs_testing"):
+        update_task_status(Path(config["task_file"]), task_id, "completed" if phase == "completed" else "needs_testing")
+    return updated
+
+
 def update_task_fields(config: Dict[str, Any], task_id: str, **fields: Any) -> Optional[StoredTask]:
     updated: Optional[StoredTask] = None
 

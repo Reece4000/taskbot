@@ -2060,10 +2060,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
             top_layout.setContentsMargins(12, 12, 12, 12)
             top_layout.setSpacing(10)
 
-            header_row = QHBoxLayout()
-            header_row.setContentsMargins(0, 0, 0, 0)
-            header_row.setSpacing(18)
-
             header_stack = QVBoxLayout()
             header_stack.setContentsMargins(0, 0, 0, 0)
             header_stack.setSpacing(8)
@@ -2124,49 +2120,37 @@ def launch_ui(config: Dict[str, Any]) -> int:
             repo_row.addWidget(agents_button)
             header_stack.addLayout(repo_row)
 
-            header_row.addLayout(header_stack, 1)
-
             controls_panel = QWidget()
             controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-            controls_grid = QGridLayout(controls_panel)
-            controls_grid.setContentsMargins(0, 0, 0, 0)
-            controls_grid.setHorizontalSpacing(8)
-            controls_grid.setVerticalSpacing(8)
+            controls_row = QHBoxLayout(controls_panel)
+            controls_row.setContentsMargins(0, 0, 0, 0)
+            controls_row.setSpacing(8)
 
             self.plan_button = QPushButton("Plan")
             self.plan_button.setObjectName("HeaderPlanButton")
             self.plan_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["plan_once"])
             self.plan_button.clicked.connect(lambda: self._spawn_runner(["plan"]))
-            controls_grid.addWidget(self.plan_button, 0, 0)
+            controls_row.addWidget(self.plan_button)
 
             self.run_button = QPushButton("Run")
             self.run_button.setObjectName("HeaderRunButton")
             self.run_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["run_once"])
             self.run_button.clicked.connect(lambda: self._spawn_runner(["run", "--iterations", "1"]))
-            controls_grid.addWidget(self.run_button, 0, 1)
+            controls_row.addWidget(self.run_button)
 
             self.loop_button = QPushButton("Loop")
             self.loop_button.setObjectName("HeaderLoopButton")
             self.loop_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["start_loop"])
             self.loop_button.clicked.connect(self._open_start_loop_dialog)
-            controls_grid.addWidget(self.loop_button, 1, 0)
+            controls_row.addWidget(self.loop_button)
 
             self.stop_button = QPushButton("Stop")
             self.stop_button.setObjectName("HeaderStopButton")
             self.stop_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["stop"])
             self.stop_button.clicked.connect(self._request_stop)
-            controls_grid.addWidget(self.stop_button, 1, 1)
+            controls_row.addWidget(self.stop_button)
 
-            header_divider = QFrame()
-            header_divider.setObjectName("HeaderDivider")
-            header_divider.setFrameShape(QFrame.VLine)
-            header_divider.setFrameShadow(QFrame.Plain)
-            header_divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-            header_divider.setFixedWidth(1)
-
-            header_row.addWidget(header_divider)
-            header_row.addWidget(controls_panel, 0, Qt.AlignTop)
-            top_layout.addLayout(header_row)
+            top_layout.addLayout(header_stack)
 
             top_region_layout.addWidget(top_shell)
 
@@ -2240,6 +2224,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
             refresh_button = QPushButton("Refresh")
             refresh_button.clicked.connect(self.refresh_view)
             board_header_layout.addWidget(refresh_button)
+
+            board_header_divider = QFrame()
+            board_header_divider.setObjectName("HeaderDivider")
+            board_header_divider.setFrameShape(QFrame.VLine)
+            board_header_divider.setFrameShadow(QFrame.Plain)
+            board_header_divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            board_header_divider.setFixedWidth(1)
+            board_header_layout.addWidget(board_header_divider)
+            board_header_layout.addWidget(controls_panel)
 
             self.columns_scroll = QScrollArea()
             self.columns_scroll.setObjectName("ColumnsScroll")

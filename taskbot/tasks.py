@@ -57,6 +57,94 @@ def _status_for_update(raw_status: Optional[str]) -> Optional[str]:
     return STATUS_ALIASES.get(cleaned)
 
 
+def _section_name_from_line(line: str) -> Optional[str]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("-"):
+        return None
+    if stripped.startswith("#"):
+        section = stripped.lstrip("#").strip()
+        return section or None
+    if stripped.endswith(":"):
+        section = stripped[:-1].strip()
+        return section or None
+    return None
+
+
+def _rewrite_section_header(line: str, new_section: str) -> str:
+    hash_match = re.match(r"^(\s*#+\s*)(.*?)(\r?\n?)$", line)
+    if hash_match:
+        return "{0}{1}{2}".format(hash_match.group(1), new_section, hash_match.group(3))
+
+    colon_match = re.match(r"^(\s*)(.*?)(:\s*)(\r?\n?)$", line)
+    if colon_match:
+        return "{0}{1}{2}{3}".format(colon_match.group(1), new_section, colon_match.group(3), colon_match.group(4))
+
+    return line
+
+
+def rename_board(task_file: Path, old_section: str, new_section: str) -> dict[str, str]:
+    if old_section == new_section:
+        return {}
+    if not task_file.exists():
+        return {}
+
+    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    tasks = parse_tasks(task_file)
+    remap = {
+        task.task_id: _stable_task_id(new_section, task.text)
+        for task in tasks
+        if task.section == old_section
+    }
+
+    rewritten = []
+    changed = False
+    for line in lines:
+        section_name = _section_name_from_line(line)
+        if section_name == old_section:
+            rewritten_line = _rewrite_section_header(line, new_section)
+            rewritten.append(rewritten_line)
+            changed = changed or rewritten_line != line
+        else:
+            rewritten.append(line)
+
+    if changed:
+        task_file.write_text("".join(rewritten), encoding="utf-8")
+    return remap
+
+
+def delete_board(task_file: Path, board_title: str) -> List[str]:
+    if not task_file.exists():
+        return []
+
+    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    tasks = parse_tasks(task_file)
+    removed_task_ids = [task.task_id for task in tasks if task.section == board_title]
+    if not removed_task_ids:
+        return []
+
+    rewritten = []
+    skipping = False
+    current_section = "root"
+
+    for line in lines:
+        section_name = _section_name_from_line(line)
+        if section_name is not None:
+            current_section = section_name
+            skipping = section_name == board_title
+            if skipping:
+                continue
+            rewritten.append(line)
+            continue
+
+        if skipping and current_section == board_title:
+            continue
+
+        rewritten.append(line)
+
+    task_file.write_text("".join(rewritten), encoding="utf-8")
+    return removed_task_ids
+
+
 def parse_tasks(task_file: Path) -> List[TaskItem]:
     lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
     tasks: List[TaskItem] = []
@@ -169,3 +257,59 @@ def delete_task(task_file: Path, task_id: str) -> bool:
     del lines[target.line_index]
     task_file.write_text("".join(lines), encoding="utf-8")
     return True
+
+
+def move_task_to_board(task_file: Path, task_id: str, new_section: str) -> dict[str, str]:
+    if not task_file.exists():
+        return {}
+
+    cleaned_section = new_section.strip()
+    if not cleaned_section:
+        return {}
+
+    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    tasks = parse_tasks(task_file)
+    target = next((task for task in tasks if task.task_id == task_id), None)
+    if target is None or target.section == cleaned_section:
+        return {}
+
+    original_line = lines[target.line_index]
+    match = TASK_LINE_RE.match(original_line)
+    if not match:
+        return {}
+
+    header_indices = [
+        line_index
+        for line_index, line in enumerate(lines)
+        if _section_name_from_line(line) is not None
+    ]
+    header_index = next(
+        (
+            line_index
+            for line_index, line in enumerate(lines)
+            if _section_name_from_line(line) == cleaned_section
+        ),
+        None,
+    )
+    if header_index is None:
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.append("# {0}\n".format(cleaned_section))
+        lines.append(moved_line if moved_line.endswith("\n") else moved_line + "\n")
+        del lines[target.line_index]
+        task_file.write_text("".join(lines), encoding="utf-8")
+        return {target.task_id: _stable_task_id(cleaned_section, target.text)}
+
+    next_header_index = next(
+        (line_index for line_index in header_indices if line_index > header_index),
+        len(lines),
+    )
+    insert_at = next_header_index
+    if target.line_index < insert_at:
+        insert_at -= 1
+
+    moved_line = original_line
+    del lines[target.line_index]
+    lines.insert(insert_at, moved_line)
+    task_file.write_text("".join(lines), encoding="utf-8")
+    return {target.task_id: _stable_task_id(cleaned_section, target.text)}

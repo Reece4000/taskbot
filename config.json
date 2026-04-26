@@ -24,7 +24,7 @@
     "planner": "gpt-5.4",
     "implementer": "gpt-5.4-mini",
     "reviewer": "gpt-5.4-mini",
-    "planner_reasoning_effort": "high",
+    "planner_reasoning_effort": "xhigh",
     "implementer_reasoning_effort": "high"
   },
   "codex": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -12,10 +13,13 @@ from taskbot.config import DEFAULT_CONFIG, load_config, save_config_overrides
 from taskbot.git_integration import capture_git_session_state, publish_git_changes
 from taskbot.runner import _build_tiny_task_plan, _run_task_once, _should_fast_path_tiny_task
 from taskbot.store import StoredTask, create_task, update_task_fields
+from taskbot.tasks import parse_tasks, rename_board as rename_markdown_board
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
     _command_enter_shortcut_sequences,
     _command_enter_dialog_candidate,
+    _command_enter_should_activate,
+    _command_enter_submit_dialog,
     _command_enter_preferred_button,
     _install_command_enter_shortcuts,
     _checkbox_indicator_tick_icon_path,
@@ -25,6 +29,7 @@ from taskbot.ui import (
     _repo_agents_path,
     _start_loop_run_args,
     _terminal_text_should_refresh,
+    _taskbot_title_html,
 )
 from taskbot.verification import VerificationResult, run_verification_steps
 
@@ -177,6 +182,44 @@ class TaskbotBehaviourTests(unittest.TestCase):
                     str((external_root / "config.json").resolve()),
                 )
 
+    def test_taskbot_title_html_uses_colored_letter_spans(self) -> None:
+        title_html = _taskbot_title_html()
+
+        self.assertEqual(re.sub(r"<[^>]+>", "", title_html), "Taskbot")
+        self.assertEqual(title_html.count("<span style=\"color:"), 7)
+        self.assertTrue(title_html.startswith('<span style="color:#c8643b;">T'))
+
+    def test_rename_markdown_board_rewrites_empty_section_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_file = Path(tmp) / "_tasks.md"
+            task_file.write_text(
+                "# Old Board\n\n# Other Board\n- unrelated task\n",
+                encoding="utf-8",
+            )
+
+            remap = rename_markdown_board(task_file, "Old Board", "Renamed Board")
+
+            self.assertEqual(remap, {})
+            rewritten = task_file.read_text(encoding="utf-8")
+            self.assertIn("# Renamed Board\n", rewritten)
+            self.assertNotIn("# Old Board\n", rewritten)
+            self.assertEqual(parse_tasks(task_file)[0].section, "Other Board")
+
+    def test_rename_markdown_board_rewrites_populated_section_and_task_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_file = Path(tmp) / "_tasks.md"
+            task_file.write_text(
+                "# Old Board\n- First task\n",
+                encoding="utf-8",
+            )
+
+            original_task = parse_tasks(task_file)[0]
+            remap = rename_markdown_board(task_file, "Old Board", "Renamed Board")
+            renamed_task = parse_tasks(task_file)[0]
+
+            self.assertEqual(remap, {original_task.task_id: renamed_task.task_id})
+            self.assertEqual(renamed_task.section, "Renamed Board")
+
     def test_terminal_refresh_cache_treats_repo_switch_to_blank_as_a_refresh(self) -> None:
         self.assertTrue(_terminal_text_should_refresh("previous repo output", ""))
         self.assertTrue(_terminal_text_should_refresh(None, ""))
@@ -319,6 +362,143 @@ class TaskbotBehaviourTests(unittest.TestCase):
             watched_window,
         )
         self.assertIs(_command_enter_dialog_candidate(object(), None), None)
+
+    def test_command_enter_should_activate_matches_meta_return_and_enter(self) -> None:
+        class FakeEvent:
+            def __init__(self, event_type: str, key: str, modifiers: int) -> None:
+                self._event_type = event_type
+                self._key = key
+                self._modifiers = modifiers
+
+            def type(self) -> str:
+                return self._event_type
+
+            def key(self) -> str:
+                return self._key
+
+            def modifiers(self) -> int:
+                return self._modifiers
+
+        activation_event_types = ("ShortcutOverride", "KeyPress")
+        return_keys = ("Return", "Enter")
+        meta_modifier = 0x01
+
+        self.assertTrue(
+            _command_enter_should_activate(
+                FakeEvent("ShortcutOverride", "Return", meta_modifier),
+                activation_event_types,
+                return_keys,
+                meta_modifier,
+            )
+        )
+        self.assertTrue(
+            _command_enter_should_activate(
+                FakeEvent("KeyPress", "Enter", meta_modifier),
+                activation_event_types,
+                return_keys,
+                meta_modifier,
+            )
+        )
+        self.assertFalse(
+            _command_enter_should_activate(
+                FakeEvent("KeyPress", "Return", 0x00),
+                activation_event_types,
+                return_keys,
+                meta_modifier,
+            )
+        )
+        self.assertFalse(
+            _command_enter_should_activate(
+                FakeEvent("KeyPress", "Space", meta_modifier),
+                activation_event_types,
+                return_keys,
+                meta_modifier,
+            )
+        )
+
+    def test_command_enter_submit_dialog_clicks_preferred_ok_button(self) -> None:
+        class FakeButton:
+            def __init__(self, text: str, enabled: bool = True, default: bool = False) -> None:
+                self._text = text
+                self._enabled = enabled
+                self._default = default
+                self.clicked = 0
+
+            def text(self) -> str:
+                return self._text
+
+            def isEnabled(self) -> bool:
+                return self._enabled
+
+            def isDefault(self) -> bool:
+                return self._default
+
+            def click(self) -> None:
+                self.clicked += 1
+
+        class FakeDialog:
+            def __init__(self, buttons, default_button=None) -> None:
+                self._buttons = buttons
+                self._default_button = default_button
+
+            def inherits(self, name: str) -> bool:
+                return name == "QDialog"
+
+            def findChildren(self, button_cls):
+                return list(self._buttons)
+
+            def defaultButton(self):
+                return self._default_button
+
+        ok_button = FakeButton("&OK")
+        cancel_button = FakeButton("Cancel")
+        dialog = FakeDialog([cancel_button, ok_button])
+
+        self.assertTrue(_command_enter_submit_dialog(dialog, None, FakeButton))
+        self.assertEqual(ok_button.clicked, 1)
+        self.assertEqual(cancel_button.clicked, 0)
+
+    def test_command_enter_submit_dialog_falls_back_to_default_button(self) -> None:
+        class FakeButton:
+            def __init__(self, text: str, enabled: bool = True, default: bool = False) -> None:
+                self._text = text
+                self._enabled = enabled
+                self._default = default
+                self.clicked = 0
+
+            def text(self) -> str:
+                return self._text
+
+            def isEnabled(self) -> bool:
+                return self._enabled
+
+            def isDefault(self) -> bool:
+                return self._default
+
+            def click(self) -> None:
+                self.clicked += 1
+
+        class FakeDialog:
+            def __init__(self, buttons, default_button=None) -> None:
+                self._buttons = buttons
+                self._default_button = default_button
+
+            def inherits(self, name: str) -> bool:
+                return name == "QDialog"
+
+            def findChildren(self, button_cls):
+                return list(self._buttons)
+
+            def defaultButton(self):
+                return self._default_button
+
+        default_button = FakeButton("Save", default=True)
+        cancel_button = FakeButton("Cancel")
+        dialog = FakeDialog([cancel_button], default_button)
+
+        self.assertTrue(_command_enter_submit_dialog(dialog, None, FakeButton))
+        self.assertEqual(default_button.clicked, 1)
+        self.assertEqual(cancel_button.clicked, 0)
 
     def test_checkbox_indicator_tick_icon_points_to_svg_asset(self) -> None:
         icon_path = _checkbox_indicator_tick_icon_path()

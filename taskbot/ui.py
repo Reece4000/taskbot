@@ -20,11 +20,14 @@ from taskbot.store import (
     StoredTask,
     create_board,
     create_task,
+    delete_board,
     delete_task,
     edit_task,
     ensure_task_store,
     load_store_snapshot,
     phase_labels,
+    move_task_to_board,
+    rename_board,
     store_path,
     update_task_phase,
 )
@@ -175,7 +178,13 @@ def _boards_from_store_snapshot(store: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "order": int(payload.get("order", 0) or 0),
             }
         )
-    boards.sort(key=lambda board: (board["order"], board["title"].lower()))
+    boards.sort(
+        key=lambda board: (
+            1 if str(board["board_id"]).strip().lower() == "archived" or str(board["title"]).strip().lower() == "archived" else 0,
+            board["order"],
+            board["title"].lower(),
+        )
+    )
     return boards
 
 
@@ -265,15 +274,15 @@ def _config_path_label_for_header(active_config: Dict[str, Any]) -> str:
             return config_path_text
 
 
-def _configure_reasoning_effort_combo(combo: Any, configured_value: Any) -> None:
+def _configure_reasoning_effort_dropdown(dropdown: Any, configured_value: Any) -> None:
     raw_value = "" if configured_value is None else str(configured_value).strip()
-    combo.addItem(REASONING_EFFORT_INHERIT_LABEL, "")
+    dropdown.addItem(REASONING_EFFORT_INHERIT_LABEL, "")
     supported_values = list(REASONING_EFFORT_CHOICES)
     if raw_value and raw_value not in supported_values:
         supported_values.insert(0, raw_value)
     for value in supported_values:
-        combo.addItem(value, value)
-    combo.setCurrentIndex(max(0, combo.findData(raw_value)))
+        dropdown.addItem(value, value)
+    dropdown.setCurrentData(raw_value)
 
 
 def _checkbox_indicator_tick_icon_path() -> Path:
@@ -347,6 +356,67 @@ def _command_enter_preferred_button(buttons: List[Any]) -> Any:
     return enabled_buttons[0] if enabled_buttons else None
 
 
+def _command_enter_should_activate(
+    event: Any,
+    activation_event_types: tuple[Any, ...],
+    return_keys: tuple[Any, ...],
+    meta_modifier: Any,
+) -> bool:
+    event_type_getter = getattr(event, "type", None)
+    key_getter = getattr(event, "key", None)
+    modifiers_getter = getattr(event, "modifiers", None)
+    if not callable(event_type_getter) or not callable(key_getter) or not callable(modifiers_getter):
+        return False
+    if event_type_getter() not in activation_event_types:
+        return False
+    if key_getter() not in return_keys:
+        return False
+    return bool(modifiers_getter() & meta_modifier)
+
+
+def _command_enter_activate_candidate(candidate_widget: Any, button_cls: Any) -> bool:
+    if candidate_widget is None:
+        return False
+
+    buttons: List[Any] = []
+    find_children = getattr(candidate_widget, "findChildren", None)
+    if callable(find_children):
+        try:
+            buttons = list(find_children(button_cls))
+        except TypeError:
+            buttons = list(find_children())
+
+    default_button_getter = getattr(candidate_widget, "defaultButton", None)
+    if callable(default_button_getter):
+        candidate_button = default_button_getter()
+        if candidate_button is not None and candidate_button not in buttons:
+            buttons.append(candidate_button)
+
+    preferred_button = _command_enter_preferred_button(buttons)
+    if preferred_button is not None:
+        click = getattr(preferred_button, "click", None)
+        if callable(click):
+            click()
+            return True
+
+    accept = getattr(candidate_widget, "accept", None)
+    if callable(accept):
+        accept()
+        return True
+
+    return False
+
+
+def _command_enter_submit_dialog(watched: Any, active_modal_widget: Any, button_cls: Any) -> bool:
+    candidate_widget = _command_enter_dialog_candidate(watched, active_modal_widget)
+    if candidate_widget is None:
+        return False
+    inherits = getattr(candidate_widget, "inherits", None)
+    if callable(inherits) and not inherits("QDialog"):
+        return False
+    return _command_enter_activate_candidate(candidate_widget, button_cls)
+
+
 TASK_DRAG_MIME_TYPE = "application/x-taskbot-task-id"
 TASK_DRAG_PHASE_MIME_TYPE = "application/x-taskbot-task-phase"
 
@@ -393,18 +463,34 @@ def _phase_label(phase: str) -> str:
     return PHASE_TITLES.get(phase, phase.replace("_", " ").title())
 
 
+def _taskbot_title_html() -> str:
+    letters = [
+        ("T", "#c8643b"),
+        ("A", "#d07a34"),
+        ("S", "#d39b3c"),
+        ("K", "#c9a64b"),
+        ("B", "#6f9d5f"),
+        ("O", "#4f98a6"),
+        ("T", "#8b6bd1"),
+    ]
+    return "".join(
+        '<span style="color:{0};">{1}</span>'.format(color, html.escape(letter))
+        for letter, color in letters
+    )
+
+
 def launch_ui(config: Dict[str, Any]) -> int:
     try:
-        from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData
-        from PySide6.QtGui import QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor
+        from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData, QRect
+        from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
-            QComboBox,
             QDialog,
             QDialogButtonBox,
             QFileDialog,
             QFrame,
+            QGridLayout,
             QHBoxLayout,
             QLabel,
             QLineEdit,
@@ -412,6 +498,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QListWidgetItem,
             QMainWindow,
             QMessageBox,
+            QMenu,
             QPlainTextEdit,
             QPushButton,
             QScrollArea,
@@ -426,6 +513,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QVBoxLayout,
             QWidget,
             QTextEdit,
+            QSplitterHandle,
         )
     except ModuleNotFoundError:
         print(
@@ -500,6 +588,170 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return match
         return "Monospace"
 
+    class _FormDropdown(QToolButton):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setObjectName("DialogDropdown")
+            self.setPopupMode(QToolButton.InstantPopup)
+            self.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            self.setFocusPolicy(Qt.StrongFocus)
+            self.setCursor(Qt.PointingHandCursor)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.setMinimumHeight(32)
+            self._menu = QMenu(self)
+            self._menu.setObjectName("DialogDropdownMenu")
+            self.setMenu(self._menu)
+            self._entries: List[Dict[str, Any]] = []
+            self._current_index = -1
+
+        def _sync_display(self) -> None:
+            current_text = self.currentText()
+            self.setText(current_text)
+            self.setToolTip(current_text)
+
+        def _select_index(self, index: int) -> None:
+            if index < 0 or index >= len(self._entries):
+                self._current_index = -1
+                self._sync_display()
+                return
+            self._current_index = index
+            self._sync_display()
+
+        def addItem(self, text: str, user_data: Any = None) -> None:
+            label = str(text)
+            data = label if user_data is None else user_data
+            action = QAction(label, self)
+            action.setData(data)
+            index = len(self._entries)
+            action.triggered.connect(lambda _checked=False, selected=index: self.setCurrentIndex(selected))
+            self._menu.addAction(action)
+            self._entries.append({"text": label, "data": data, "action": action})
+            if self._current_index < 0:
+                self._select_index(index)
+
+        def addItems(self, texts: List[str]) -> None:
+            for text in texts:
+                self.addItem(text)
+
+        def addCustomAction(self, text: str, callback: Any) -> QAction:
+            if self._entries and self._menu.actions():
+                self._menu.addSeparator()
+            action = self._menu.addAction(text)
+            action.triggered.connect(lambda _checked=False: callback())
+            return action
+
+        def clear(self) -> None:
+            self._menu.clear()
+            self._entries.clear()
+            self._current_index = -1
+            self._sync_display()
+
+        def count(self) -> int:
+            return len(self._entries)
+
+        def currentIndex(self) -> int:
+            return self._current_index
+
+        def currentText(self) -> str:
+            if 0 <= self._current_index < len(self._entries):
+                return str(self._entries[self._current_index]["text"])
+            return ""
+
+        def currentData(self) -> Any:
+            if 0 <= self._current_index < len(self._entries):
+                return self._entries[self._current_index]["data"]
+            return None
+
+        def findText(self, text: str) -> int:
+            target = str(text)
+            for index, entry in enumerate(self._entries):
+                if entry["text"] == target:
+                    return index
+            return -1
+
+        def findData(self, data: Any) -> int:
+            for index, entry in enumerate(self._entries):
+                if entry["data"] == data:
+                    return index
+            return -1
+
+        def setCurrentIndex(self, index: int) -> None:
+            self._select_index(index)
+
+        def setCurrentText(self, text: str) -> None:
+            target = str(text)
+            index = self.findText(target)
+            if index < 0:
+                if target:
+                    self.addItem(target, target)
+                    index = len(self._entries) - 1
+                else:
+                    self._select_index(-1)
+                    return
+            self._select_index(index)
+
+        def setCurrentData(self, data: Any) -> None:
+            index = self.findData(data)
+            if index < 0:
+                if data is None:
+                    self._select_index(-1)
+                    return
+                label = str(data)
+                self.addItem(label, data)
+                index = len(self._entries) - 1
+            self._select_index(index)
+
+    class _CenteredSplitterHandle(QSplitterHandle):
+        def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+            super().__init__(orientation, parent)
+            self.setMouseTracking(True)
+            self.setAttribute(Qt.WA_Hover, True)
+
+        def _line_rect(self) -> QRect:
+            rect = self.rect()
+            if rect.width() <= 0 or rect.height() <= 0:
+                return QRect()
+
+            thickness = 2
+            if self.orientation() == Qt.Horizontal:
+                line_length = min(50, max(0, rect.height() - 16))
+                if line_length <= 0:
+                    return QRect()
+                x = rect.x() + (rect.width() - thickness) // 2
+                y = rect.y() + (rect.height() - line_length) // 2
+                return QRect(x, y, thickness, line_length)
+
+            line_length = min(50, max(0, rect.width() - 16))
+            if line_length <= 0:
+                return QRect()
+            x = rect.x() + (rect.width() - line_length) // 2
+            y = rect.y() + (rect.height() - thickness) // 2
+            return QRect(x, y, line_length, thickness)
+
+        def enterEvent(self, event) -> None:
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event) -> None:
+            self.update()
+            super().leaveEvent(event)
+
+        def paintEvent(self, event) -> None:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            line_rect = self._line_rect()
+            if not line_rect.isValid():
+                return
+            hovered = self.underMouse()
+            color = QColor(77, 62, 51, 114 if hovered else 72)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(line_rect, 1, 1)
+
+    class _CenteredLineSplitter(QSplitter):
+        def createHandle(self) -> QSplitterHandle:
+            return _CenteredSplitterHandle(self.orientation(), self)
+
     def _set_primary_button_default(buttons: QDialogButtonBox, standard_button: Any) -> None:
         primary_button = buttons.button(standard_button)
         if primary_button is not None:
@@ -511,7 +763,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             super().__init__(parent)
             self._command_enter_shortcuts = _install_command_enter_shortcuts(
                 self,
-                self.accept,
+                lambda: _command_enter_submit_dialog(self, self, QPushButton),
                 QShortcut,
                 QKeySequence,
                 Qt.WindowShortcut,
@@ -519,40 +771,30 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
     class CommandEnterModalFilter(QObject):
         def eventFilter(self, watched: QObject, event: Any) -> bool:
-            if event.type() != QEvent.KeyPress:
-                return super().eventFilter(watched, event)
-            if event.key() not in (Qt.Key_Return, Qt.Key_Enter):
-                return super().eventFilter(watched, event)
-            if not (event.modifiers() & Qt.MetaModifier):
-                return super().eventFilter(watched, event)
-
-            candidate_widget = _command_enter_dialog_candidate(watched, app.activeModalWidget())
-            if candidate_widget is None:
-                return super().eventFilter(watched, event)
-            inherits = getattr(candidate_widget, "inherits", None)
-            if not callable(inherits) or not inherits("QDialog"):
+            if not _command_enter_should_activate(
+                event,
+                (QEvent.ShortcutOverride, QEvent.KeyPress),
+                (Qt.Key_Return, Qt.Key_Enter),
+                Qt.MetaModifier,
+            ):
                 return super().eventFilter(watched, event)
 
-            buttons = list(candidate_widget.findChildren(QPushButton))
-            default_button_getter = getattr(candidate_widget, "defaultButton", None)
-            if callable(default_button_getter):
-                candidate_button = default_button_getter()
-                if candidate_button is not None and candidate_button not in buttons:
-                    buttons.append(candidate_button)
-            # Prefer an explicit OK button when the dialog exposes one, then fall back
-            # to the window's default positive action.
-            preferred_button = _command_enter_preferred_button(buttons)
-            if preferred_button is None or not preferred_button.isEnabled():
-                return super().eventFilter(watched, event)
+            if _command_enter_submit_dialog(watched, app.activeModalWidget(), QPushButton):
+                return True
 
-            preferred_button.click()
-            return True
+            return super().eventFilter(watched, event)
 
-    class AddBoardDialog(CommandEnterDialog):
-        def __init__(self, parent: QWidget | None = None) -> None:
+    class BoardTitleDialog(CommandEnterDialog):
+        def __init__(self,
+                     *,
+                     window_title: str,
+                     dialog_title: str,
+                     caption: str,
+                     board_title: str = "",
+                     parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self.setObjectName("AppDialog")
-            self.setWindowTitle("New Board")
+            self.setWindowTitle(window_title)
             self.setModal(False)
             self.resize(400, 180)
 
@@ -560,18 +802,19 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.setContentsMargins(16, 16, 16, 16)
             layout.setSpacing(10)
 
-            title = QLabel("Create Board")
+            title = QLabel(dialog_title)
             title.setObjectName("DialogTitle")
             layout.addWidget(title)
 
-            caption = QLabel("Boards can stay empty until you need them.")
-            caption.setObjectName("DialogCaption")
-            caption.setWordWrap(True)
-            layout.addWidget(caption)
+            caption_label = QLabel(caption)
+            caption_label.setObjectName("DialogCaption")
+            caption_label.setWordWrap(True)
+            layout.addWidget(caption_label)
 
             self.title_input = QLineEdit()
             self.title_input.setPlaceholderText("Board title")
             self.title_input.setMinimumHeight(32)
+            self.title_input.setText(board_title)
             layout.addWidget(self.title_input)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -582,6 +825,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.addSpacing(6)
             layout.addWidget(buttons)
 
+            if board_title:
+                self.title_input.selectAll()
+            self.title_input.setFocus()
+
         def accept(self) -> None:
             if not self.board_title():
                 QMessageBox.warning(self, "Board Title Required", "Enter a board title.")
@@ -591,6 +838,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def board_title(self) -> str:
             return self.title_input.text().strip()
+
+    class AddBoardDialog(BoardTitleDialog):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(
+                window_title="New Board",
+                dialog_title="Create Board",
+                caption="Boards can stay empty until you need them.",
+                parent=parent,
+            )
 
     class AddTaskDialog(CommandEnterDialog):
         def __init__(self,
@@ -626,13 +882,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_label.setObjectName("FieldLabel")
             layout.addWidget(board_label)
 
-            self.board_combo = QComboBox()
-            self.board_combo.addItems(available_boards)
-            self.board_combo.setEditable(False)
-            default_index = self.board_combo.findText(default_board or available_boards[0])
-            if default_index >= 0:
-                self.board_combo.setCurrentIndex(default_index)
-            layout.addWidget(self.board_combo)
+            self.board_dropdown = _FormDropdown()
+            self.board_dropdown.addItems(available_boards)
+            self.board_dropdown.setCurrentText(default_board or available_boards[0])
+            layout.addWidget(self.board_dropdown)
 
             task_label = QLabel("Title")
             task_label.setObjectName("FieldLabel")
@@ -668,12 +921,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             if not self.board_title():
                 QMessageBox.warning(self, "Board Required", "Choose a board.")
-                self.board_combo.setFocus()
+                self.board_dropdown.setFocus()
                 return
             super().accept()
 
         def board_title(self) -> str:
-            return self.board_combo.currentText().strip()
+            return self.board_dropdown.currentText().strip()
 
         def task_title(self) -> str:
             return self.title_input.text().strip()
@@ -686,9 +939,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
                      task: StoredTask,
                      board_titles: List[str],
                      phases: List[str],
+                     new_board_callback: Any | None = None,
                      parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self.task = task
+            self._new_board_callback = new_board_callback
             self.setObjectName("AppDialog")
             self.setWindowTitle("Edit Task")
             self.setModal(False)
@@ -720,22 +975,22 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_label.setObjectName("FieldLabel")
             layout.addWidget(board_label)
 
-            self.board_combo = QComboBox()
-            self.board_combo.addItems(available_boards)
-            self.board_combo.setEditable(True)
-            self.board_combo.setCurrentText(task.board_title)
-            layout.addWidget(self.board_combo)
+            self.board_dropdown = _FormDropdown()
+            self.board_dropdown.addItems(available_boards)
+            self.board_dropdown.setCurrentText(task.board_title)
+            if self._new_board_callback is not None:
+                self.board_dropdown.addCustomAction("New board...", self._create_new_board)
+            layout.addWidget(self.board_dropdown)
 
             phase_label = QLabel("Phase")
             phase_label.setObjectName("FieldLabel")
             layout.addWidget(phase_label)
 
-            self.phase_combo = QComboBox()
+            self.phase_dropdown = _FormDropdown()
             for phase in phases:
-                self.phase_combo.addItem(PHASE_TITLES.get(phase, phase), phase)
-            phase_index = max(0, self.phase_combo.findData(task.phase))
-            self.phase_combo.setCurrentIndex(phase_index)
-            layout.addWidget(self.phase_combo)
+                self.phase_dropdown.addItem(PHASE_TITLES.get(phase, phase), phase)
+            self.phase_dropdown.setCurrentData(task.phase)
+            layout.addWidget(self.phase_dropdown)
 
             task_label = QLabel("Title")
             task_label.setObjectName("FieldLabel")
@@ -774,25 +1029,35 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             if not self.board_title():
                 QMessageBox.warning(self, "Board Required", "Choose or enter a board.")
-                self.board_combo.setFocus()
+                self.board_dropdown.setFocus()
                 return
             if not self.phase_value():
                 QMessageBox.warning(self, "Phase Required", "Choose a workflow phase.")
-                self.phase_combo.setFocus()
+                self.phase_dropdown.setFocus()
                 return
             super().accept()
 
         def board_title(self) -> str:
-            return self.board_combo.currentText().strip()
+            return self.board_dropdown.currentText().strip()
 
         def phase_value(self) -> str:
-            return str(self.phase_combo.currentData() or "").strip()
+            return str(self.phase_dropdown.currentData() or "").strip()
 
         def task_title(self) -> str:
             return self.title_input.text().strip()
 
         def context_notes(self) -> str:
             return self.context_input.toPlainText().strip()
+
+        def _create_new_board(self) -> None:
+            if self._new_board_callback is None:
+                return
+            created_board_title = self._new_board_callback()
+            if not created_board_title:
+                return
+            if self.board_dropdown.findText(created_board_title) < 0:
+                self.board_dropdown.addItem(created_board_title, created_board_title)
+            self.board_dropdown.setCurrentText(created_board_title)
 
     class SettingsDialog(CommandEnterDialog):
         def __init__(self, active_config: Dict[str, Any], parent: QWidget | None = None) -> None:
@@ -808,14 +1073,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
             verification_config = active_config.get("verification", {})
             git_config = active_config.get("git", {})
 
-            def _configure_model_combo(combo: QComboBox, configured_value: Any, fallback_value: str) -> None:
+            def _configure_model_dropdown(dropdown: Any, configured_value: Any, fallback_value: str) -> None:
                 raw_value = "" if configured_value is None else str(configured_value).strip()
                 selected_value = raw_value or fallback_value
                 model_options = list(MODEL_CHOICES)
                 if selected_value and selected_value not in model_options:
                     model_options.insert(0, selected_value)
-                combo.addItems(model_options)
-                combo.setCurrentText(selected_value)
+                dropdown.addItems(model_options)
+                dropdown.setCurrentText(selected_value)
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(16, 16, 16, 16)
@@ -859,61 +1124,61 @@ def launch_ui(config: Dict[str, Any]) -> int:
             sandbox_label.setObjectName("FieldLabel")
             settings_layout.addWidget(sandbox_label)
 
-            self.sandbox_combo = QComboBox()
-            self.sandbox_combo.addItems(SANDBOX_MODES)
-            self.sandbox_combo.setCurrentText(str(codex_config.get("sandbox", "workspace-write")))
-            settings_layout.addWidget(self.sandbox_combo)
+            self.sandbox_dropdown = _FormDropdown()
+            self.sandbox_dropdown.addItems(SANDBOX_MODES)
+            self.sandbox_dropdown.setCurrentText(str(codex_config.get("sandbox", "workspace-write")))
+            settings_layout.addWidget(self.sandbox_dropdown)
 
             approval_label = QLabel("Approval")
             approval_label.setObjectName("FieldLabel")
             settings_layout.addWidget(approval_label)
 
-            self.approval_combo = QComboBox()
-            self.approval_combo.addItems(APPROVAL_POLICIES)
-            self.approval_combo.setCurrentText(str(codex_config.get("ask_for_approval", "never")))
-            settings_layout.addWidget(self.approval_combo)
+            self.approval_dropdown = _FormDropdown()
+            self.approval_dropdown.addItems(APPROVAL_POLICIES)
+            self.approval_dropdown.setCurrentText(str(codex_config.get("ask_for_approval", "never")))
+            settings_layout.addWidget(self.approval_dropdown)
 
             planner_label = QLabel("Planner")
             planner_label.setObjectName("FieldLabel")
             settings_layout.addWidget(planner_label)
 
-            self.planner_model_input = QComboBox()
-            _configure_model_combo(self.planner_model_input, model_config.get("planner", ""), "gpt-5.4")
-            settings_layout.addWidget(self.planner_model_input)
+            self.planner_model_dropdown = _FormDropdown()
+            _configure_model_dropdown(self.planner_model_dropdown, model_config.get("planner", ""), "gpt-5.4")
+            settings_layout.addWidget(self.planner_model_dropdown)
 
             planner_effort_label = QLabel("Planner Reasoning Effort")
             planner_effort_label.setObjectName("FieldLabel")
             settings_layout.addWidget(planner_effort_label)
 
-            self.planner_reasoning_effort_input = QComboBox()
-            _configure_reasoning_effort_combo(
-                self.planner_reasoning_effort_input,
+            self.planner_reasoning_effort_dropdown = _FormDropdown()
+            _configure_reasoning_effort_dropdown(
+                self.planner_reasoning_effort_dropdown,
                 model_config.get("planner_reasoning_effort", ""),
             )
-            settings_layout.addWidget(self.planner_reasoning_effort_input)
+            settings_layout.addWidget(self.planner_reasoning_effort_dropdown)
 
             implementer_label = QLabel("Implementer")
             implementer_label.setObjectName("FieldLabel")
             settings_layout.addWidget(implementer_label)
 
-            self.implementer_model_input = QComboBox()
-            _configure_model_combo(
-                self.implementer_model_input,
+            self.implementer_model_dropdown = _FormDropdown()
+            _configure_model_dropdown(
+                self.implementer_model_dropdown,
                 model_config.get("implementer", ""),
                 "gpt-5.4-mini",
             )
-            settings_layout.addWidget(self.implementer_model_input)
+            settings_layout.addWidget(self.implementer_model_dropdown)
 
             implementer_effort_label = QLabel("Implementer Reasoning Effort")
             implementer_effort_label.setObjectName("FieldLabel")
             settings_layout.addWidget(implementer_effort_label)
 
-            self.implementer_reasoning_effort_input = QComboBox()
-            _configure_reasoning_effort_combo(
-                self.implementer_reasoning_effort_input,
+            self.implementer_reasoning_effort_dropdown = _FormDropdown()
+            _configure_reasoning_effort_dropdown(
+                self.implementer_reasoning_effort_dropdown,
                 model_config.get("implementer_reasoning_effort", ""),
             )
-            settings_layout.addWidget(self.implementer_reasoning_effort_input)
+            settings_layout.addWidget(self.implementer_reasoning_effort_dropdown)
 
             reasoning_caption = QLabel("Leave blank to inherit the current Codex reasoning effort.")
             reasoning_caption.setObjectName("SidebarCaption")
@@ -928,15 +1193,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
             verification_mode_label.setObjectName("FieldLabel")
             settings_layout.addWidget(verification_mode_label)
 
-            self.verification_mode_combo = QComboBox()
+            self.verification_mode_dropdown = _FormDropdown()
             for value, label_text in VERIFICATION_MODES.items():
-                self.verification_mode_combo.addItem(label_text, value)
-            mode_index = max(
-                0,
-                self.verification_mode_combo.findData(_resolved_verification_mode(active_config)),
-            )
-            self.verification_mode_combo.setCurrentIndex(mode_index)
-            settings_layout.addWidget(self.verification_mode_combo)
+                self.verification_mode_dropdown.addItem(label_text, value)
+            self.verification_mode_dropdown.setCurrentData(_resolved_verification_mode(active_config))
+            settings_layout.addWidget(self.verification_mode_dropdown)
 
             verification_notes_label = QLabel("Verify Notes")
             verification_notes_label.setObjectName("FieldLabel")
@@ -1024,16 +1285,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.resize(600, 700)
 
         def settings_payload(self) -> Dict[str, Any]:
-            planner_model = self.planner_model_input.currentText().strip()
-            implementer_model = self.implementer_model_input.currentText().strip()
-            planner_reasoning_effort = str(self.planner_reasoning_effort_input.currentData() or "").strip()
-            implementer_reasoning_effort = str(self.implementer_reasoning_effort_input.currentData() or "").strip()
-            verification_mode = str(self.verification_mode_combo.currentData() or "manual").strip() or "manual"
+            planner_model = self.planner_model_dropdown.currentText().strip()
+            implementer_model = self.implementer_model_dropdown.currentText().strip()
+            planner_reasoning_effort = str(self.planner_reasoning_effort_dropdown.currentData() or "").strip()
+            implementer_reasoning_effort = str(self.implementer_reasoning_effort_dropdown.currentData() or "").strip()
+            verification_mode = str(self.verification_mode_dropdown.currentData() or "manual").strip() or "manual"
             verification_commands = _parse_verification_command_lines(self.verification_commands_input.toPlainText())
             return {
                 "codex": {
-                    "sandbox": self.sandbox_combo.currentText().strip(),
-                    "ask_for_approval": self.approval_combo.currentText().strip(),
+                    "sandbox": self.sandbox_dropdown.currentText().strip(),
+                    "ask_for_approval": self.approval_dropdown.currentText().strip(),
                 },
                 "models": {
                     "planner": planner_model or "gpt-5.4",
@@ -1181,6 +1442,42 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def loop_run_args(self) -> List[str]:
             return _start_loop_run_args(self.run_indefinitely(), self.iteration_count())
 
+    class _ElidingLabel(QLabel):
+        def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self._full_text = ""
+            self._elide_mode = Qt.ElideRight
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.setMinimumWidth(0)
+            if text:
+                self.setText(text)
+
+        def setText(self, text: str) -> None:
+            self._full_text = str(text)
+            self.setToolTip(self._full_text)
+            self._refresh_text()
+
+        def resizeEvent(self, event) -> None:
+            super().resizeEvent(event)
+            self._refresh_text()
+
+        def changeEvent(self, event) -> None:
+            super().changeEvent(event)
+            if event.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.PaletteChange):
+                self._refresh_text()
+
+        def _refresh_text(self) -> None:
+            available_width = max(0, self.contentsRect().width())
+            if not self._full_text:
+                super().setText("")
+                return
+            if available_width <= 0:
+                super().setText(self._full_text)
+                return
+            elided_text = self.fontMetrics().elidedText(self._full_text, self._elide_mode, available_width)
+            if elided_text != super().text():
+                super().setText(elided_text)
+
     class TaskCard(QFrame):
         def __init__(self,
                      task: StoredTask,
@@ -1188,12 +1485,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
                      show_board: bool,
                      on_edit: Any,
                      on_delete: Any,
-                     on_move_task: Any = None) -> None:
+                     on_move_task: Any = None,
+                     on_move_task_to_board: Any = None) -> None:
             super().__init__()
             self._task_id = task.task_id
+            self._task_board_id = task.board_id
             self._task_phase = task.phase
             self._on_edit = on_edit
+            self._on_delete = on_delete
             self._on_move_task = on_move_task
+            self._on_move_task_to_board = on_move_task_to_board
             self._drag_start_position: Any = None
             self._drag_in_progress = False
             self.setObjectName("TaskCard")
@@ -1206,12 +1507,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.setToolTip("Click to edit. Drag to move between columns.")
 
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(12, 10, 12, 10)
-            layout.setSpacing(7)
+            layout.setContentsMargins(12, 9, 12, 9)
+            layout.setSpacing(5)
 
             top_row = QHBoxLayout()
             top_row.setContentsMargins(0, 0, 0, 0)
-            top_row.setSpacing(8)
+            top_row.setSpacing(6)
 
             if show_board:
                 board_badge = QLabel(task.board_title)
@@ -1220,32 +1521,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 top_row.addWidget(board_badge, 0, Qt.AlignLeft)
 
             top_row.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
-
-            delete_button = QToolButton()
-            delete_button.setObjectName("CardDeleteButton")
-            delete_button.setCursor(Qt.PointingHandCursor)
-            delete_button.setToolTip("Delete task")
-            delete_button.setAutoRaise(False)
-            delete_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-            trash_icon_path = _trash_icon_path()
-            if trash_icon_path.exists():
-                delete_button.setIcon(QIcon(str(trash_icon_path)))
-            else:
-                trash_pixmap = getattr(QStyle, "SP_TrashIcon", None)
-                if trash_pixmap is None:
-                    trash_pixmap = getattr(QStyle, "SP_DialogDiscardButton", None)
-                if trash_pixmap is None:
-                    standard_pixmap = getattr(QStyle, "StandardPixmap", None)
-                    if standard_pixmap is not None:
-                        trash_pixmap = getattr(standard_pixmap, "SP_TrashIcon", None)
-                        if trash_pixmap is None:
-                            trash_pixmap = getattr(standard_pixmap, "SP_DialogDiscardButton", None)
-                if trash_pixmap is not None:
-                    delete_button.setIcon(self.style().standardIcon(trash_pixmap))
-            delete_button.setIconSize(QSize(12, 12))
-            delete_button.setFixedSize(24, 24)
-            delete_button.clicked.connect(on_delete)
-            top_row.addWidget(delete_button)
             layout.addLayout(top_row)
 
             title = QLabel(task.title)
@@ -1266,6 +1541,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 context.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 layout.addWidget(context)
 
+            footer_row = QHBoxLayout()
+            footer_row.setContentsMargins(0, 0, 0, 0)
+            footer_row.setSpacing(8)
+
+            if show_board:
+                board_badge = _ElidingLabel(task.board_title)
+                board_badge.setObjectName("BoardBadge")
+                board_badge.setTextFormat(Qt.PlainText)
+                board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                footer_row.addWidget(board_badge, 1)
+
             meta_parts = [task.task_id[:8]]
             meta_parts.append("ready" if task.plan_status == "ready" else "pending")
             relevant_files = []
@@ -1277,7 +1563,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             meta.setObjectName("TaskMeta")
             meta.setTextFormat(Qt.PlainText)
             meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            layout.addWidget(meta)
+            footer_row.addWidget(meta)
+            layout.addLayout(footer_row)
 
             if task.last_error:
                 error = QLabel(task.last_error)
@@ -1286,6 +1573,36 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 error.setWordWrap(True)
                 error.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 layout.addWidget(error)
+
+        def _copy_task_id(self) -> None:
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(self._task_id)
+
+        def _archive_task(self) -> None:
+            if self._on_move_task_to_board is None:
+                return
+            self._on_move_task_to_board(self._task_id, "archived")
+
+        def _show_context_menu(self, global_pos: Any) -> None:
+            menu = QMenu(self)
+            copy_action = menu.addAction("Copy Card ID")
+            edit_action = menu.addAction("Edit Card")
+            archive_action = menu.addAction("Archive Card")
+            delete_action = menu.addAction("Delete Card")
+
+            if self._on_move_task_to_board is None or self._task_board_id == "archived":
+                archive_action.setEnabled(False)
+
+            action = menu.exec(global_pos)
+            if action == copy_action:
+                self._copy_task_id()
+            elif action == edit_action:
+                self._on_edit()
+            elif action == archive_action and archive_action.isEnabled():
+                self._archive_task()
+            elif action == delete_action:
+                self._on_delete()
 
         def _accepts_task_drop(self, event: Any) -> bool:
             if self._on_move_task is None:
@@ -1373,6 +1690,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             super().keyPressEvent(event)
 
+        def contextMenuEvent(self, event) -> None:
+            self._show_context_menu(event.globalPos())
+            event.accept()
+
     class BoardListDelegate(QStyledItemDelegate):
         _title_role = Qt.UserRole + 1
         _count_role = Qt.UserRole + 2
@@ -1381,8 +1702,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def initStyleOption(self, option, index) -> None:
             super().initStyleOption(option, index)
 
+            board_id = str(index.data(Qt.UserRole) or "")
             title = str(index.data(self._title_role) or "")
             count = index.data(self._count_role)
+            is_archived = board_id == "archived" or title.lower() == "archived"
+            if is_archived:
+                option.font.setBold(True)
+                option.palette.setColor(QPalette.Text, QColor("#a13e35"))
+                option.palette.setColor(QPalette.WindowText, QColor("#a13e35"))
+                option.palette.setColor(QPalette.HighlightedText, QColor("#a13e35"))
             if count is None or option.rect.width() <= 0:
                 return
 
@@ -1394,6 +1722,75 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 option.fontMetrics.elidedText(title, Qt.ElideRight, title_width),
                 suffix,
             )
+
+        def paint(self, painter, option, index) -> None:
+            super().paint(painter, option, index)
+
+            board_id = str(index.data(Qt.UserRole) or "")
+            title = str(index.data(self._title_role) or "")
+            if board_id != "archived" and title.lower() != "archived":
+                return
+
+            painter.save()
+            painter.setPen(QColor("#d7b4a6"))
+            y = option.rect.top()
+            painter.drawLine(option.rect.left() + 8, y, option.rect.right() - 8, y)
+            painter.restore()
+
+    class BoardList(QListWidget):
+        def __init__(self, on_move_task_to_board: Any, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._on_move_task_to_board = on_move_task_to_board
+            self.setAcceptDrops(True)
+
+        def _accepts_task_drop(self, event: Any) -> bool:
+            task_id, _source_phase = _drag_payload_from_mime_data(event.mimeData())
+            if not task_id or self._on_move_task_to_board is None:
+                return False
+            item = self.itemAt(event.position().toPoint())
+            if item is None:
+                return False
+            board_id = item.data(Qt.UserRole)
+            return board_id is not None
+
+        def dragEnterEvent(self, event) -> None:
+            if self._accepts_task_drop(event):
+                _set_drag_highlight(self, True)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+
+        def dragMoveEvent(self, event) -> None:
+            if self._accepts_task_drop(event):
+                _set_drag_highlight(self, True)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+
+        def dragLeaveEvent(self, event) -> None:
+            _set_drag_highlight(self, False)
+            super().dragLeaveEvent(event)
+
+        def dropEvent(self, event) -> None:
+            _set_drag_highlight(self, False)
+            if not self._accepts_task_drop(event):
+                event.ignore()
+                return
+
+            item = self.itemAt(event.position().toPoint())
+            if item is None:
+                event.ignore()
+                return
+
+            board_id = item.data(Qt.UserRole)
+            if board_id is None or self._on_move_task_to_board is None:
+                event.ignore()
+                return
+
+            task_id, _source_phase = _drag_payload_from_mime_data(event.mimeData())
+            self._on_move_task_to_board(task_id, str(board_id))
+            event.setDropAction(Qt.MoveAction)
+            event.acceptProposedAction()
 
     class PhaseColumn(QFrame):
         def __init__(self, phase: str) -> None:
@@ -1439,7 +1836,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                       show_board: bool,
                       on_edit_task: Any,
                       on_delete_task: Any,
-                      on_move_task: Any) -> None:
+                      on_move_task: Any,
+                      on_move_task_to_board: Any) -> None:
             self._on_move_task = on_move_task
             self.count_label.setText(str(len(tasks)))
             while self.body_layout.count():
@@ -1465,6 +1863,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                         on_edit=lambda _checked=False, current_task=task: on_edit_task(current_task),
                         on_delete=lambda _checked=False, current_task=task: on_delete_task(current_task),
                         on_move_task=on_move_task,
+                        on_move_task_to_board=on_move_task_to_board,
                     )
                 )
 
@@ -1580,27 +1979,41 @@ def launch_ui(config: Dict[str, Any]) -> int:
             top_shell = QFrame()
             top_shell.setObjectName("TopShell")
             top_layout = QVBoxLayout(top_shell)
-            top_layout.setContentsMargins(12, 10, 12, 10)
-            top_layout.setSpacing(8)
+            top_layout.setContentsMargins(12, 12, 12, 12)
+            top_layout.setSpacing(10)
+
+            header_row = QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
+            header_row.setSpacing(18)
+
+            header_stack = QVBoxLayout()
+            header_stack.setContentsMargins(0, 0, 0, 0)
+            header_stack.setSpacing(8)
 
             title_row = QHBoxLayout()
             title_row.setContentsMargins(0, 0, 0, 0)
-            title_row.setSpacing(8)
+            title_row.setSpacing(14)
 
-            title_stack = QVBoxLayout()
-            title_stack.setContentsMargins(0, 0, 0, 0)
-            title_stack.setSpacing(0)
-
-            headline = QLabel("Taskbot")
+            headline = QLabel()
             headline.setObjectName("Headline")
-            title_stack.addWidget(headline)
-            title_row.addLayout(title_stack)
-            title_row.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
+            headline.setTextFormat(Qt.RichText)
+            headline.setText(_taskbot_title_html())
+            headline.setWordWrap(False)
+            headline.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            title_row.addWidget(headline, 0, Qt.AlignBottom)
+
+            self.runtime_label = QLabel("")
+            self.runtime_label.setObjectName("RuntimeLabel")
+            self.runtime_label.setTextFormat(Qt.RichText)
+            self.runtime_label.setWordWrap(False)
+            self.runtime_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.runtime_label.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+            title_row.addWidget(self.runtime_label, 1, Qt.AlignBottom)
 
             self.status_chip = QLabel("Idle")
             self.status_chip.setObjectName("StatusChip")
             title_row.addWidget(self.status_chip, 0, Qt.AlignTop)
-            top_layout.addLayout(title_row)
+            header_stack.addLayout(title_row)
 
             repo_row = QHBoxLayout()
             repo_row.setContentsMargins(0, 0, 0, 0)
@@ -1631,40 +2044,51 @@ def launch_ui(config: Dict[str, Any]) -> int:
             agents_button = QPushButton("Agents")
             agents_button.clicked.connect(self._open_agents_dialog)
             repo_row.addWidget(agents_button)
-            top_layout.addLayout(repo_row)
+            header_stack.addLayout(repo_row)
 
-            controls_row = QHBoxLayout()
-            controls_row.setContentsMargins(0, 0, 0, 0)
-            controls_row.setSpacing(8)
+            header_row.addLayout(header_stack, 1)
 
-            self.runtime_label = QLabel("")
-            self.runtime_label.setObjectName("RuntimeLabel")
-            self.runtime_label.setTextFormat(Qt.RichText)
-            self.runtime_label.setWordWrap(False)
-            self.runtime_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            controls_row.addWidget(self.runtime_label, 1)
+            controls_panel = QWidget()
+            controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            controls_grid = QGridLayout(controls_panel)
+            controls_grid.setContentsMargins(0, 0, 0, 0)
+            controls_grid.setHorizontalSpacing(8)
+            controls_grid.setVerticalSpacing(8)
 
             self.plan_button = QPushButton("Plan")
+            self.plan_button.setObjectName("HeaderPlanButton")
             self.plan_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["plan_once"])
             self.plan_button.clicked.connect(lambda: self._spawn_runner(["plan"]))
-            controls_row.addWidget(self.plan_button)
+            controls_grid.addWidget(self.plan_button, 0, 0)
 
             self.run_button = QPushButton("Run")
+            self.run_button.setObjectName("HeaderRunButton")
             self.run_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["run_once"])
             self.run_button.clicked.connect(lambda: self._spawn_runner(["run", "--iterations", "1"]))
-            controls_row.addWidget(self.run_button)
+            controls_grid.addWidget(self.run_button, 0, 1)
 
             self.loop_button = QPushButton("Loop")
+            self.loop_button.setObjectName("HeaderLoopButton")
             self.loop_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["start_loop"])
             self.loop_button.clicked.connect(self._open_start_loop_dialog)
-            controls_row.addWidget(self.loop_button)
+            controls_grid.addWidget(self.loop_button, 1, 0)
 
             self.stop_button = QPushButton("Stop")
-            self.stop_button.setObjectName("DangerButton")
+            self.stop_button.setObjectName("HeaderStopButton")
             self.stop_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["stop"])
             self.stop_button.clicked.connect(self._request_stop)
-            controls_row.addWidget(self.stop_button)
-            top_layout.addLayout(controls_row)
+            controls_grid.addWidget(self.stop_button, 1, 1)
+
+            header_divider = QFrame()
+            header_divider.setObjectName("HeaderDivider")
+            header_divider.setFrameShape(QFrame.VLine)
+            header_divider.setFrameShadow(QFrame.Plain)
+            header_divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            header_divider.setFixedWidth(1)
+
+            header_row.addWidget(header_divider)
+            header_row.addWidget(controls_panel, 0, Qt.AlignTop)
+            top_layout.addLayout(header_row)
 
             top_region_layout.addWidget(top_shell)
 
@@ -1692,11 +2116,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             boards_header.addWidget(add_board_button)
             sidebar_layout.addLayout(boards_header)
 
-            self.board_list = QListWidget()
+            self.board_list = BoardList(self._move_task_to_board)
             self.board_list.setObjectName("BoardList")
             self.board_list.setItemDelegate(BoardListDelegate(self.board_list))
             self.board_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.board_list.setTextElideMode(Qt.ElideNone)
+            self.board_list.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.board_list.customContextMenuRequested.connect(self._open_board_context_menu)
             self.board_list.currentItemChanged.connect(self._on_board_selection_changed)
             sidebar_layout.addWidget(self.board_list, 1)
 
@@ -1785,10 +2211,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_shell_layout.addWidget(self.stage_shell, 1)
             center_shell_layout.addWidget(self.board_shell, 1)
 
-            content_splitter = QSplitter(Qt.Horizontal)
+            content_splitter = _CenteredLineSplitter(Qt.Horizontal)
             content_splitter.setObjectName("ContentSplitter")
             content_splitter.setChildrenCollapsible(False)
-            content_splitter.setHandleWidth(6)
+            content_splitter.setHandleWidth(8)
             content_splitter.addWidget(sidebar)
             content_splitter.addWidget(center_shell)
             content_splitter.setStretchFactor(0, 0)
@@ -1829,10 +2255,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.terminal_output.setMinimumHeight(130)
             terminal_layout.addWidget(self.terminal_output)
 
-            self.main_splitter = QSplitter(Qt.Vertical)
+            self.main_splitter = _CenteredLineSplitter(Qt.Vertical)
             self.main_splitter.setObjectName("MainSplitter")
             self.main_splitter.setChildrenCollapsible(False)
-            self.main_splitter.setHandleWidth(4)
+            self.main_splitter.setHandleWidth(6)
             self.main_splitter.addWidget(top_region)
             self.main_splitter.addWidget(terminal_shell)
             self.main_splitter.setStretchFactor(0, 1)
@@ -1872,10 +2298,18 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 border-radius: 8px;
             }
 
+            QFrame#HeaderDivider {
+                background: rgba(77, 62, 51, 0.12);
+                border: none;
+                min-width: 1px;
+                max-width: 1px;
+                margin: 4px 0;
+            }
+
             QLabel#Headline {
                 color: #1f1814;
-                font-size: 16px;
-                font-weight: 700;
+                font-size: 22px;
+                font-weight: 800;
             }
 
             QLabel#StatusChip {
@@ -1926,10 +2360,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QLineEdit,
-            QComboBox,
             QPlainTextEdit,
             QListWidget,
-            QSpinBox {
+            QSpinBox,
+            QDialog#AppDialog QToolButton#DialogDropdown {
                 background: #fffdf9;
                 color: #221a16;
                 border: 1px solid #d8cab9;
@@ -1938,21 +2372,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QLineEdit:focus,
-            QComboBox:focus,
             QPlainTextEdit:focus,
             QListWidget:focus,
-            QSpinBox:focus {
+            QSpinBox:focus,
+            QDialog#AppDialog QToolButton#DialogDropdown:focus {
                 border: 1px solid #c8643b;
             }
 
             QSpinBox:disabled {
                 background: #f4ece2;
                 color: #8c7b6f;
-            }
-
-            QComboBox::drop-down {
-                border: none;
-                width: 24px;
             }
 
             QPushButton,
@@ -1984,14 +2413,44 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 background: #b85b34;
             }
 
-            QPushButton#DangerButton {
-                background: #3c1f1f;
-                color: #ffe9e7;
-                border: 1px solid #613131;
+            QPushButton#HeaderPlanButton {
+                background: #d8e9fa;
+                color: #23456a;
+                border: 1px solid #b6cfe7;
             }
 
-            QPushButton#DangerButton:hover {
-                background: #512626;
+            QPushButton#HeaderPlanButton:hover {
+                background: #cae0f4;
+            }
+
+            QPushButton#HeaderRunButton {
+                background: #dcefdc;
+                color: #275533;
+                border: 1px solid #b9d6ba;
+            }
+
+            QPushButton#HeaderRunButton:hover {
+                background: #cde4ce;
+            }
+
+            QPushButton#HeaderLoopButton {
+                background: #215a34;
+                color: #ffffff;
+                border: 1px solid #174325;
+            }
+
+            QPushButton#HeaderLoopButton:hover {
+                background: #2a6a3e;
+            }
+
+            QPushButton#HeaderStopButton {
+                background: #6f2222;
+                color: #ffffff;
+                border: 1px solid #551818;
+            }
+
+            QPushButton#HeaderStopButton:hover {
+                background: #832929;
             }
 
             QToolButton#SmallActionButton {
@@ -2033,6 +2492,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 border: 1px solid #e2d6c7;
                 border-radius: 4px;
                 padding: 3px;
+            }
+
+            QListWidget#BoardList[dragOver="true"] {
+                background: #f8efe6;
+                border: 1px solid #c8643b;
             }
 
             QListWidget#BoardList::item {
@@ -2095,65 +2559,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 width: 0px;
             }
 
-            QSplitter#MainSplitter::handle {
-                background: transparent;
-            }
-
-            QSplitter#MainSplitter::handle:vertical {
-                height: 4px;
-                margin: 0;
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0.00 rgba(77, 62, 51, 0.00),
-                    stop: 0.24 rgba(77, 62, 51, 0.00),
-                    stop: 0.24 rgba(77, 62, 51, 0.14),
-                    stop: 0.76 rgba(77, 62, 51, 0.14),
-                    stop: 0.76 rgba(77, 62, 51, 0.00),
-                    stop: 1.00 rgba(77, 62, 51, 0.00)
-                );
-            }
-
-            QSplitter#MainSplitter::handle:vertical:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0.00 rgba(77, 62, 51, 0.00),
-                    stop: 0.24 rgba(77, 62, 51, 0.00),
-                    stop: 0.24 rgba(77, 62, 51, 0.20),
-                    stop: 0.76 rgba(77, 62, 51, 0.20),
-                    stop: 0.76 rgba(77, 62, 51, 0.00),
-                    stop: 1.00 rgba(77, 62, 51, 0.00)
-                );
-            }
-
+            QSplitter#MainSplitter::handle,
             QSplitter#ContentSplitter::handle {
                 background: transparent;
-                border-radius: 3px;
-            }
-
-            QSplitter#ContentSplitter::handle:horizontal {
-                width: 6px;
-                margin: 0;
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 0,
-                    stop: 0.00 rgba(77, 62, 51, 0.00),
-                    stop: 0.33 rgba(77, 62, 51, 0.00),
-                    stop: 0.33 rgba(77, 62, 51, 0.12),
-                    stop: 0.67 rgba(77, 62, 51, 0.12),
-                    stop: 0.67 rgba(77, 62, 51, 0.00),
-                    stop: 1.00 rgba(77, 62, 51, 0.00)
-                );
-            }
-
-            QSplitter#ContentSplitter::handle:horizontal:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 0,
-                    stop: 0.00 rgba(77, 62, 51, 0.00),
-                    stop: 0.33 rgba(77, 62, 51, 0.00),
-                    stop: 0.33 rgba(77, 62, 51, 0.18),
-                    stop: 0.67 rgba(77, 62, 51, 0.18),
-                    stop: 0.67 rgba(77, 62, 51, 0.00),
-                    stop: 1.00 rgba(77, 62, 51, 0.00)
-                );
+                border: none;
             }
 
             QFrame#PhaseColumn {
@@ -2316,6 +2725,28 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 background: #fbf8f3;
             }
 
+            QDialog#AppDialog QToolButton#DialogDropdown {
+                min-height: 32px;
+                text-align: left;
+                padding-right: 26px;
+                font-weight: 500;
+            }
+
+            QDialog#AppDialog QToolButton#DialogDropdown:hover {
+                background: #f7f0e8;
+            }
+
+            QDialog#AppDialog QToolButton#DialogDropdown:pressed {
+                background: #efe4d7;
+            }
+
+            QDialog#AppDialog QToolButton#DialogDropdown::menu-indicator {
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: 14px;
+                height: 14px;
+            }
+
             QDialog#AppDialog QScrollArea#SettingsScrollArea > QWidget {
                 background: #fbf8f3;
             }
@@ -2324,17 +2755,25 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 background: #fbf8f3;
             }
 
-            QDialog#AppDialog QComboBox QAbstractItemView {
+            QDialog#AppDialog QMenu#DialogDropdownMenu {
                 background: #fffdf9;
                 color: #221a16;
                 border: 1px solid #d8cab9;
-                selection-background-color: #edd6c7;
-                selection-color: #251c17;
-                outline: none;
             }
 
-            QDialog#AppDialog QComboBox QAbstractItemView::item {
+            QDialog#AppDialog QMenu#DialogDropdownMenu::item {
                 padding: 6px 8px;
+            }
+
+            QDialog#AppDialog QMenu#DialogDropdownMenu::item:selected {
+                background: #edd6c7;
+                color: #251c17;
+            }
+
+            QDialog#AppDialog QMenu#DialogDropdownMenu::separator {
+                height: 1px;
+                background: #eadfce;
+                margin: 4px 6px;
             }
 
             QDialog#AppDialog QDialogButtonBox#DialogButtons {
@@ -2447,12 +2886,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             store = load_store_snapshot(self.active_config)
             self._cached_boards = _boards_from_store_snapshot(store)
+            board_orders = {board["board_id"]: board["order"] for board in self._cached_boards}
             self._cached_tasks = [
                 StoredTask.from_payload(payload)
                 for payload in store.get("tasks", [])
                 if isinstance(payload, dict)
             ]
-            self._cached_tasks.sort(key=lambda task: (task.board_title.lower(), task.order, task.title.lower()))
+            self._cached_tasks.sort(key=lambda task: (board_orders.get(task.board_id, 9999), task.order, task.title.lower()))
             self._store_signature = _path_signature(store_path(self.active_config))
             return True
 
@@ -2558,7 +2998,74 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def _available_board_titles(self) -> List[str]:
             self._refresh_store_cache()
-            return [board["title"] for board in self._cached_boards]
+            return [
+                board["title"]
+                for board in self._cached_boards
+                if str(board["board_id"]).strip().lower() != "archived"
+            ]
+
+        def _active_tasks(self, tasks: List[StoredTask]) -> List[StoredTask]:
+            return [task for task in tasks if task.board_id != "archived"]
+
+        def _board_from_item(self, item: QListWidgetItem | None) -> Optional[Dict[str, Any]]:
+            if item is None:
+                return None
+
+            board_id = item.data(Qt.UserRole)
+            title = str(item.data(Qt.UserRole + 1) or "")
+            count = int(item.data(Qt.UserRole + 2) or 0)
+            if board_id is None:
+                return {
+                    "board_id": None,
+                    "title": title,
+                    "order": -1,
+                    "count": count,
+                    "is_virtual": True,
+                    "is_protected": True,
+                }
+
+            board = next(
+                (
+                    payload
+                    for payload in self._cached_boards
+                    if payload["board_id"] == str(board_id)
+                ),
+                None,
+            )
+            resolved = dict(board) if board is not None else {
+                "board_id": str(board_id),
+                "title": title,
+                "order": 0,
+            }
+            resolved["count"] = count
+            resolved["is_virtual"] = False
+            resolved["is_protected"] = (
+                str(resolved.get("board_id", "")) == "archived"
+                or str(resolved.get("title", "")).lower() == "archived"
+            )
+            return resolved
+
+        def _open_board_context_menu(self, pos: Any) -> None:
+            item = self.board_list.itemAt(pos)
+            board = self._board_from_item(item)
+            if board is None:
+                return
+
+            if board.get("is_virtual"):
+                return
+
+            menu = QMenu(self.board_list)
+            rename_action = menu.addAction("Rename")
+            delete_action = menu.addAction("Delete")
+            if board.get("is_protected"):
+                rename_action.setEnabled(False)
+                delete_action.setEnabled(False)
+
+            action = menu.exec(self.board_list.mapToGlobal(pos))
+            if action == rename_action and rename_action.isEnabled():
+                self._open_rename_board_dialog(board)
+            elif action == delete_action and delete_action.isEnabled():
+                self._delete_board(board)
 
         def _browse_repo(self) -> None:
             selected = QFileDialog.getExistingDirectory(
@@ -2679,6 +3186,71 @@ def launch_ui(config: Dict[str, Any]) -> int:
             finally:
                 dialog.deleteLater()
 
+        def _open_rename_board_dialog(self, board: Dict[str, Any]) -> None:
+            dialog = BoardTitleDialog(
+                window_title="Rename Board",
+                dialog_title="Rename Board",
+                caption="Update the board title. Existing tasks stay on the same board.",
+                board_title=str(board.get("title", "")),
+                parent=self,
+            )
+            active_config = self.active_config
+            board_id = str(board.get("board_id", ""))
+
+            def accept_board() -> None:
+                try:
+                    updated = rename_board(active_config, board_id, dialog.board_title())
+                except Exception as exc:
+                    QMessageBox.critical(self, "Failed To Rename Board", str(exc))
+                    return
+                if updated is None:
+                    QMessageBox.critical(self, "Failed To Rename Board", "Board could not be found.")
+                    return
+
+                renamed_board_id = str(updated.get("board_id", board_id)).strip() or board_id
+                self.selected_board_id = renamed_board_id
+                self.status_note = "Renamed board {0} to {1}".format(board.get("title", ""), updated["title"])
+                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._activate_repo_config(Path(active_config["repo_root"]))
+                self.refresh_view()
+
+            self._show_modeless_dialog(dialog, accept_board)
+
+        def _delete_board(self, board: Dict[str, Any]) -> None:
+            board_title = str(board.get("title", ""))
+            task_count = int(board.get("count", 0) or 0)
+            task_word = "task" if task_count == 1 else "tasks"
+            detail = "This will remove {0} {1} from the board store and markdown task file.".format(
+                task_count,
+                task_word,
+            )
+
+            confirmed = QMessageBox.question(
+                self,
+                "Delete Board",
+                'Delete "{0}"?\n\n{1}'.format(board_title, detail),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirmed != QMessageBox.Yes:
+                return
+
+            try:
+                deleted = delete_board(self.active_config, str(board.get("board_id", "")))
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Delete Board", str(exc))
+                return
+            if deleted is None:
+                QMessageBox.critical(self, "Failed To Delete Board", "Board could not be found.")
+                return
+
+            if self.selected_board_id == deleted["board_id"]:
+                self.selected_board_id = None
+            self.status_note = "Deleted board {0}".format(deleted["title"])
+            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._activate_repo_config(Path(self.active_config["repo_root"]))
+            self.refresh_view()
+
         def _open_add_board_dialog(self) -> None:
             dialog = AddBoardDialog(self)
             active_config = self.active_config
@@ -2699,9 +3271,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def _open_add_task_dialog(self) -> None:
             board_titles = self._available_board_titles()
-            default_board = self._selected_board_title() or str(
-                self.active_config.get("store", {}).get("default_board", "General")
-            )
+            default_board = self._selected_board_title()
+            if default_board and default_board.lower() == "archived":
+                default_board = None
+            if self.selected_board_id is None:
+                default_board = str(self.active_config.get("store", {}).get("default_board", "General"))
+            elif not default_board:
+                default_board = str(self.active_config.get("store", {}).get("default_board", "General"))
             dialog = AddTaskDialog(board_titles, default_board, self)
             active_config = self.active_config
 
@@ -2728,7 +3304,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
             active_config = self.active_config
             board_titles = self._available_board_titles()
             phase_order = list(self.phase_order)
-            dialog = EditTaskDialog(task, board_titles, phase_order, self)
+
+            def create_board_for_edit() -> Optional[str]:
+                dialog = AddBoardDialog(self)
+                try:
+                    if dialog.exec() != QDialog.Accepted:
+                        return None
+                    board = create_board(active_config, dialog.board_title())
+                except Exception as exc:
+                    QMessageBox.critical(self, "Failed To Create Board", str(exc))
+                    return None
+
+                self.status_note = "Created board {0}".format(board["title"])
+                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._activate_repo_config(Path(active_config["repo_root"]))
+                self.refresh_view()
+                return str(board["title"])
+
+            dialog = EditTaskDialog(task, board_titles, phase_order, create_board_for_edit, self)
 
             def accept_task_update() -> None:
                 try:
@@ -2807,6 +3400,26 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _needs_testing_task(self, task: StoredTask) -> None:
             self._move_task_to_phase(task, "needs_testing")
 
+        def _move_task_to_board(self, task_id: str, board_id: str) -> None:
+            current_task = next((task for task in self._cached_tasks if task.task_id == task_id), None)
+            if current_task is not None and current_task.board_id == board_id:
+                return
+            try:
+                updated = move_task_to_board(self.active_config, task_id, board_id)
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Update Task", str(exc))
+                return
+            if updated is None:
+                QMessageBox.critical(self, "Failed To Update Task", "Task could not be found.")
+                return
+
+            if board_id == "archived":
+                self.status_note = "Archived task {0}".format(updated.task_id)
+            else:
+                self.status_note = "Moved task {0} to {1}".format(updated.task_id, updated.board_title)
+            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self.refresh_view()
+
         def _spawn_runner(self, args: List[str]) -> None:
             runtime_path = self._runtime_path()
             if runtime_path.exists():
@@ -2858,37 +3471,43 @@ def launch_ui(config: Dict[str, Any]) -> int:
             note_html = html.escape(self.status_note)
             if stop_requested:
                 note_html = '<span style="color:#a13e35; font-weight:700;">Stop Requested</span>'
+            active_tasks = self._active_tasks(tasks)
             self.status_chip.setText(runner_phase.upper())
             self.runtime_label.setText(
-                "Cfg: {0} | Boards: {1} | Tasks: {2} | Note: {3}".format(
+                "Config: {0} | Boards: {1} | Tasks: {2} | Note: {3}".format(
                     html.escape(self._config_path_label()),
                     len(boards),
-                    len(tasks),
+                    len(active_tasks),
                     note_html,
                 )
             )
 
         def _populate_board_list(self, boards: List[Dict[str, Any]], tasks: List[StoredTask]) -> None:
+            active_tasks = self._active_tasks(tasks)
             counts: Dict[str, int] = {}
-            for task in tasks:
+            archived_count = 0
+            for task in active_tasks:
                 counts[task.board_id] = counts.get(task.board_id, 0) + 1
+            for task in tasks:
+                if task.board_id == "archived":
+                    archived_count += 1
 
             selected_board_id = self.selected_board_id
             vertical_value, horizontal_value = self._capture_scroll_state(self.board_list)
             self.board_list.blockSignals(True)
             self.board_list.clear()
 
-            all_item = QListWidgetItem("All Boards | {0}".format(len(tasks)))
+            all_item = QListWidgetItem("All Boards | {0}".format(len(active_tasks)))
             all_item.setData(Qt.UserRole, None)
             all_item.setData(Qt.UserRole + 1, "All Boards")
-            all_item.setData(Qt.UserRole + 2, len(tasks))
+            all_item.setData(Qt.UserRole + 2, len(active_tasks))
             self.board_list.addItem(all_item)
 
             selected_row = 0
             matched_selection = False
             for index, board in enumerate(boards, start=1):
                 title = board["title"]
-                count = counts.get(board["board_id"], 0)
+                count = archived_count if board["board_id"] == "archived" else counts.get(board["board_id"], 0)
                 item = QListWidgetItem("{0} | {1}".format(title, count))
                 item.setData(Qt.UserRole, board["board_id"])
                 item.setData(Qt.UserRole + 1, title)
@@ -2917,10 +3536,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.board_title_label.setText(selected_title)
                 self.board_summary_label.setText("{0} tasks | {1} columns".format(len(tasks), len(self.phase_order)))
             else:
+                active_tasks = self._active_tasks(tasks)
                 self.board_title_label.setText("All Boards")
                 self.board_summary_label.setText(
                     "{0} tasks | {1} boards | {2} columns".format(
-                        len(tasks),
+                        len(active_tasks),
                         len(boards),
                         len(self.phase_order),
                     )
@@ -2929,7 +3549,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _refresh_columns(self, tasks: List[StoredTask]) -> None:
             selected_board_id = self.selected_board_id
             vertical_value, horizontal_value = self._capture_scroll_state(self.columns_scroll)
-            visible_tasks = tasks
+            visible_tasks = self._active_tasks(tasks)
             if selected_board_id:
                 visible_tasks = [task for task in tasks if task.board_id == selected_board_id]
 
@@ -2942,6 +3562,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     on_edit_task=self._open_edit_task_dialog,
                     on_delete_task=self._delete_task,
                     on_move_task=self._move_task_to_phase,
+                    on_move_task_to_board=self._move_task_to_board,
                 )
             QTimer.singleShot(
                 0,
@@ -3009,9 +3630,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             selection_changed = self.selected_board_id != self._last_rendered_selected_board_id
             if store_changed or selection_changed:
-                self._update_board_header(tasks if self.selected_board_id is None else [
+                visible_tasks = self._active_tasks(tasks) if self.selected_board_id is None else [
                     task for task in tasks if task.board_id == self.selected_board_id
-                ], boards)
+                ]
+                self._update_board_header(visible_tasks, boards)
                 self._refresh_columns(tasks)
                 self._last_rendered_selected_board_id = self.selected_board_id
                 QTimer.singleShot(0, self._sync_stage_scrollbar)

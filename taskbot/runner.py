@@ -25,7 +25,6 @@ from taskbot.store import (
     create_task,
     ensure_task_store,
     list_store_tasks,
-    load_store_snapshot,
     phase_labels,
     select_next_task,
     store_path,
@@ -1061,13 +1060,13 @@ def _cmd_status(config: Dict[str, Any]) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print("taskbot is idle")
-    store = load_store_snapshot(config)
     counts = {phase: 0 for phase in phase_labels(config)}
-    for task_payload in store.get("tasks", []):
-        if not isinstance(task_payload, dict):
-            continue
-        phase = str(task_payload.get("phase", "backlog"))
-        counts[phase] = counts.get(phase, 0) + 1
+    for task in list_store_tasks(
+        config,
+        include_completed=True,
+        include_needs_testing=True,
+    ):
+        counts[task.phase] = counts.get(task.phase, 0) + 1
     print("phase_counts:", json.dumps(counts, sort_keys=True))
     print("task_store:", store_path(config))
     print("terminal_log:", terminal_log_path(config))

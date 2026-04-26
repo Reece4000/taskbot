@@ -10,10 +10,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from taskbot.tasks import TaskItem, delete_task as delete_markdown_task, parse_tasks, update_task_status
+from taskbot.tasks import (
+    TaskItem,
+    delete_board as delete_markdown_board,
+    delete_task as delete_markdown_task,
+    parse_tasks,
+    move_task_to_board as move_markdown_task_to_board,
+    rename_board as rename_markdown_board,
+    update_task_status,
+)
 
 
 STORE_VERSION = 1
+ARCHIVED_BOARD_ID = "archived"
+ARCHIVED_BOARD_TITLE = "Archived"
+ARCHIVED_BOARD_ORDER = 10**9
 DEFAULT_PHASES = [
     "backlog",
     "planning",
@@ -43,6 +54,22 @@ def _slugify(text: str) -> str:
 def _stable_task_id(board_title: str, title: str) -> str:
     digest = hashlib.sha1((board_title + "\n" + title).encode("utf-8")).hexdigest()[:8]
     return "{0}-{1}".format(_slugify(board_title), digest)
+
+
+def _is_archived_board_id(board_id: str) -> bool:
+    return str(board_id).strip() == ARCHIVED_BOARD_ID
+
+
+def _is_archived_board_title(board_title: str) -> bool:
+    return str(board_title).strip().lower() == ARCHIVED_BOARD_TITLE.lower()
+
+
+def _board_sort_key(payload: Dict[str, Any]) -> tuple[int, int, str]:
+    board_id = str(payload.get("board_id", ""))
+    title = str(payload.get("title", ""))
+    if _is_archived_board_id(board_id) or _is_archived_board_title(title):
+        return (1, ARCHIVED_BOARD_ORDER, title.lower())
+    return (0, int(payload.get("order", 0) or 0), title.lower())
 
 
 def _task_status_from_phase(phase: str) -> str:
@@ -171,7 +198,13 @@ def _default_store(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "version": STORE_VERSION,
         "phases": phases,
-        "boards": [],
+        "boards": [
+            {
+                "board_id": ARCHIVED_BOARD_ID,
+                "title": ARCHIVED_BOARD_TITLE,
+                "order": ARCHIVED_BOARD_ORDER,
+            }
+        ],
         "tasks": [],
     }
 
@@ -183,6 +216,45 @@ def _normalise_store(store: Dict[str, Any], config: Dict[str, Any]) -> Dict[str,
     normalised.setdefault("boards", [])
     normalised.setdefault("tasks", [])
     return normalised
+
+
+def _ensure_special_boards(store: Dict[str, Any]) -> bool:
+    changed = False
+    boards = store.setdefault("boards", [])
+    archived = next(
+        (
+            board
+            for board in boards
+            if isinstance(board, dict)
+            and (
+                _is_archived_board_id(str(board.get("board_id", "")))
+                or _is_archived_board_title(str(board.get("title", "")))
+            )
+        ),
+        None,
+    )
+    if archived is None:
+        boards.append(
+            {
+                "board_id": ARCHIVED_BOARD_ID,
+                "title": ARCHIVED_BOARD_TITLE,
+                "order": ARCHIVED_BOARD_ORDER,
+            }
+        )
+        changed = True
+    else:
+        if str(archived.get("board_id", "")) != ARCHIVED_BOARD_ID:
+            archived["board_id"] = ARCHIVED_BOARD_ID
+            changed = True
+        if str(archived.get("title", "")) != ARCHIVED_BOARD_TITLE:
+            archived["title"] = ARCHIVED_BOARD_TITLE
+            changed = True
+        if int(archived.get("order", ARCHIVED_BOARD_ORDER) or ARCHIVED_BOARD_ORDER) != ARCHIVED_BOARD_ORDER:
+            archived["order"] = ARCHIVED_BOARD_ORDER
+            changed = True
+
+    boards.sort(key=_board_sort_key)
+    return changed
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -205,9 +277,19 @@ def _load_store_unlocked(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ensure_board(store: Dict[str, Any], board_title: str, order_hint: int) -> str:
+    if _is_archived_board_title(board_title):
+        _ensure_special_boards(store)
+        return ARCHIVED_BOARD_ID
+
     board_id = _slugify(board_title)
+    if _is_archived_board_id(board_id):
+        _ensure_special_boards(store)
+        return ARCHIVED_BOARD_ID
+
     boards = store["boards"]
-    existing = next((board for board in boards if str(board.get("board_id", "")) == board_id), None)
+    existing = next((board for board in boards if str(board.get("title", "")) == board_title), None)
+    if existing is None:
+        existing = next((board for board in boards if str(board.get("board_id", "")) == board_id), None)
     if existing is None:
         boards.append(
             {
@@ -219,11 +301,46 @@ def _ensure_board(store: Dict[str, Any], board_title: str, order_hint: int) -> s
     else:
         existing["title"] = board_title
         existing["order"] = min(int(existing.get("order", order_hint) or order_hint), order_hint)
-    boards.sort(key=lambda board: (int(board.get("order", 0) or 0), str(board.get("title", ""))))
+    _ensure_special_boards(store)
     return board_id
 
 
+def _find_board_by_id(store: Dict[str, Any], board_id: str) -> Optional[Dict[str, Any]]:
+    return next(
+        (
+            board
+            for board in store.get("boards", [])
+            if isinstance(board, dict) and str(board.get("board_id", "")) == board_id
+        ),
+        None,
+    )
+
+
+def _find_board_by_title(store: Dict[str, Any], board_title: str) -> Optional[Dict[str, Any]]:
+    return next(
+        (
+            board
+            for board in store.get("boards", [])
+            if isinstance(board, dict) and str(board.get("title", "")) == board_title
+        ),
+        None,
+    )
+
+
+def _board_title_in_use(store: Dict[str, Any], board_title: str, *, exclude_board_id: Optional[str] = None) -> bool:
+    for board in store.get("boards", []):
+        if not isinstance(board, dict):
+            continue
+        if str(board.get("title", "")) != board_title:
+            continue
+        if exclude_board_id is not None and str(board.get("board_id", "")) == exclude_board_id:
+            continue
+        return True
+    return False
+
+
 def _sync_markdown_unlocked(store: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, int]:
+    _ensure_special_boards(store)
     task_file = Path(config["task_file"])
     if not task_file.exists():
         return {"added": 0, "updated": 0}
@@ -313,7 +430,9 @@ def _mutate_store(config: Dict[str, Any],
         store = _load_store_unlocked(path, config)
         if sync_markdown:
             _sync_markdown_unlocked(store, config)
+        _ensure_special_boards(store)
         result = mutator(store)
+        _ensure_special_boards(store)
         _atomic_write_json(path, store)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
     return result
@@ -374,7 +493,7 @@ def list_boards(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "order": int(payload.get("order", 0) or 0),
             }
         )
-    boards.sort(key=lambda board: (board["order"], board["title"].lower()))
+    boards.sort(key=lambda board: (1 if _is_archived_board_id(board["board_id"]) or _is_archived_board_title(board["title"]) else 0, board["order"], board["title"].lower()))
     return boards
 
 
@@ -382,6 +501,7 @@ def list_store_tasks(config: Dict[str, Any],
                      *,
                      include_completed: bool = False,
                      include_needs_testing: bool = False,
+                     include_archived: bool = False,
                      task_id: Optional[str] = None,
                      text_query: Optional[str] = None) -> List[StoredTask]:
     store = load_store_snapshot(config)
@@ -389,6 +509,8 @@ def list_store_tasks(config: Dict[str, Any],
     tasks: List[StoredTask] = []
     for task in _sorted_tasks(store):
         if task_id and task.task_id != task_id:
+            continue
+        if not include_archived and not task_id and _is_archived_board_id(task.board_id):
             continue
         haystack = "{0}\n{1}\n{2}".format(task.board_title, task.title, task.context_notes).lower()
         if query and query not in haystack:
@@ -410,6 +532,7 @@ def select_next_task(config: Dict[str, Any],
         config,
         include_completed=True,
         include_needs_testing=True,
+        include_archived=False,
         task_id=task_id,
         text_query=text_query,
     )
@@ -489,6 +612,8 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
         cleaned_board = board_title.strip()
         if not cleaned_board:
             raise ValueError("board title cannot be empty")
+        if _is_archived_board_title(cleaned_board):
+            raise ValueError("the Archived board is reserved")
         board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
         for payload in store.get("boards", []):
             if not isinstance(payload, dict):
@@ -506,6 +631,120 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
     if created is None:
         raise RuntimeError("failed to create board")
     return created
+
+
+def rename_board(config: Dict[str, Any], board_id: str, board_title: str) -> Optional[Dict[str, Any]]:
+    updated: Optional[Dict[str, Any]] = None
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal updated
+        cleaned_title = board_title.strip()
+        if not cleaned_title:
+            raise ValueError("board title cannot be empty")
+        if _is_archived_board_id(board_id) or _is_archived_board_title(cleaned_title):
+            raise ValueError("the Archived board cannot be renamed")
+
+        board = _find_board_by_id(store, board_id)
+        if board is None:
+            return
+
+        old_title = str(board.get("title", ""))
+        if old_title == cleaned_title:
+            updated = {
+                "board_id": board_id,
+                "title": cleaned_title,
+                "order": int(board.get("order", 0) or 0),
+            }
+            return
+
+        if _board_title_in_use(store, cleaned_title, exclude_board_id=board_id):
+            raise ValueError("board title already exists")
+
+        board["title"] = cleaned_title
+        task_file = Path(config["task_file"])
+        task_id_map: Dict[str, str] = {}
+        for payload in store.get("tasks", []):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("board_id", "")) != board_id:
+                continue
+
+            changed = False
+            if str(payload.get("board_title", "")) != cleaned_title:
+                payload["board_title"] = cleaned_title
+                changed = True
+            if str(payload.get("source_kind", "")) == "markdown":
+                old_task_id = str(payload.get("task_id", ""))
+                new_task_id = _stable_task_id(cleaned_title, str(payload.get("title", "")))
+                if old_task_id != new_task_id:
+                    task_id_map[old_task_id] = new_task_id
+                    payload["task_id"] = new_task_id
+                    changed = True
+            if changed:
+                payload["updated_at"] = _now_iso()
+
+        if task_file.exists():
+            file_task_id_map = rename_markdown_board(task_file, old_title, cleaned_title)
+            if file_task_id_map:
+                task_id_map.update(file_task_id_map)
+
+        _sync_markdown_unlocked(store, config)
+        updated = {
+            "board_id": board_id,
+            "title": cleaned_title,
+            "order": int(board.get("order", 0) or 0),
+            "task_id_map": task_id_map,
+        }
+
+    _mutate_store(config, mutate, sync_markdown=True)
+    return updated
+
+
+def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, Any]]:
+    deleted: Optional[Dict[str, Any]] = None
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal deleted
+        board = _find_board_by_id(store, board_id)
+        if board is None:
+            return
+
+        board_title = str(board.get("title", ""))
+        if board_id == "archived" or board_title.lower() == "archived":
+            raise ValueError("the Archived board cannot be deleted")
+
+        removed_task_ids = [
+            str(payload.get("task_id", ""))
+            for payload in store.get("tasks", [])
+            if isinstance(payload, dict) and str(payload.get("board_id", "")) == board_id
+        ]
+        task_count = len(removed_task_ids)
+        store["tasks"] = [
+            payload
+            for payload in store.get("tasks", [])
+            if not (isinstance(payload, dict) and str(payload.get("board_id", "")) == board_id)
+        ]
+        store["boards"] = [
+            payload
+            for payload in store.get("boards", [])
+            if not (isinstance(payload, dict) and str(payload.get("board_id", "")) == board_id)
+        ]
+
+        task_file = Path(config["task_file"])
+        if task_file.exists():
+            delete_markdown_board(task_file, board_title)
+
+        _sync_markdown_unlocked(store, config)
+        deleted = {
+            "board_id": board_id,
+            "title": board_title,
+            "order": int(board.get("order", 0) or 0),
+            "task_count": task_count,
+            "task_ids": removed_task_ids,
+        }
+
+    _mutate_store(config, mutate, sync_markdown=True)
+    return deleted
 
 
 def apply_task_decomposition(config: Dict[str, Any],
@@ -652,6 +891,56 @@ def edit_task(config: Dict[str, Any],
         update_task_status(
             Path(config["task_file"]),
             task_id,
+            _markdown_status_for_phase(updated.phase),
+        )
+    return updated
+
+
+def move_task_to_board(config: Dict[str, Any], task_id: str, board_id: str) -> Optional[StoredTask]:
+    updated: Optional[StoredTask] = None
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal updated
+        board = _find_board_by_id(store, board_id)
+        if board is None and _is_archived_board_id(board_id):
+            _ensure_board(store, ARCHIVED_BOARD_TITLE, ARCHIVED_BOARD_ORDER)
+            board = _find_board_by_id(store, board_id)
+        if board is None:
+            return
+
+        cleaned_board_title = str(board.get("title", ARCHIVED_BOARD_TITLE)).strip() or ARCHIVED_BOARD_TITLE
+        task_file = Path(config["task_file"])
+        for payload in store.get("tasks", []):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("task_id", "")) != task_id:
+                continue
+
+            old_task_id = str(payload.get("task_id", ""))
+            old_board_title = str(payload.get("board_title", ""))
+            current_board_id = str(payload.get("board_id", ""))
+            if current_board_id == str(board.get("board_id", board_id)) and old_board_title == cleaned_board_title:
+                return
+
+            payload["board_id"] = str(board.get("board_id", board_id))
+            payload["board_title"] = cleaned_board_title
+
+            if str(payload.get("source_kind", "")) == "markdown" and task_file.exists():
+                task_id_map = move_markdown_task_to_board(task_file, old_task_id, cleaned_board_title)
+                new_task_id = task_id_map.get(old_task_id, old_task_id)
+                if new_task_id != old_task_id:
+                    payload["task_id"] = new_task_id
+            if old_board_title != cleaned_board_title:
+                payload["updated_at"] = _now_iso()
+            updated = StoredTask.from_payload(payload)
+            break
+
+    _mutate_store(config, mutate, sync_markdown=True)
+
+    if updated and updated.source_kind == "markdown":
+        update_task_status(
+            Path(config["task_file"]),
+            updated.task_id,
             _markdown_status_for_phase(updated.phase),
         )
     return updated

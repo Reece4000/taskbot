@@ -14,6 +14,7 @@ from taskbot.tasks import (
     TaskItem,
     delete_board as delete_markdown_board,
     delete_task as delete_markdown_task,
+    rewrite_task as rewrite_markdown_task,
     parse_tasks,
     move_task_to_board as move_markdown_task_to_board,
     rename_board as rename_markdown_board,
@@ -933,16 +934,42 @@ def edit_task(config: Dict[str, Any],
         if cleaned_phase not in phase_labels(config):
             raise ValueError("invalid task phase: {0}".format(cleaned_phase))
 
+        task_file = Path(config["task_file"])
         for payload in store.get("tasks", []):
             if not isinstance(payload, dict):
                 continue
             if str(payload.get("task_id", "")) != task_id:
                 continue
 
-            board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
-            payload["board_id"] = board_id
-            payload["board_title"] = cleaned_board
-            payload["title"] = cleaned_title
+            current_task_id = task_id
+            if str(payload.get("source_kind", "")) == "markdown" and task_file.exists():
+                requested_board = str(payload.get("board_title", "")) != cleaned_board
+                requested_title = str(payload.get("title", "")) != cleaned_title
+                if requested_board or requested_title:
+                    task_id_map = rewrite_markdown_task(
+                        task_file,
+                        task_id,
+                        new_text=cleaned_title,
+                        new_section=cleaned_board,
+                    )
+                    current_task_id = task_id_map.get(task_id, task_id)
+                    payload["task_id"] = current_task_id
+
+                _sync_markdown_unlocked(store, config)
+                payload = next(
+                    (
+                        task_payload
+                        for task_payload in store.get("tasks", [])
+                        if isinstance(task_payload, dict) and str(task_payload.get("task_id", "")) == current_task_id
+                    ),
+                    payload,
+                )
+            else:
+                board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
+                payload["board_id"] = board_id
+                payload["board_title"] = cleaned_board
+                payload["title"] = cleaned_title
+
             payload["context_notes"] = context_notes.strip()
             payload["phase"] = cleaned_phase
             payload["updated_at"] = _now_iso()
@@ -954,7 +981,7 @@ def edit_task(config: Dict[str, Any],
     if updated and updated.source_kind == "markdown":
         update_task_status(
             Path(config["task_file"]),
-            task_id,
+            updated.task_id,
             _markdown_status_for_phase(updated.phase),
         )
     return updated

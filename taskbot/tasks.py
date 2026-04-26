@@ -259,6 +259,82 @@ def delete_task(task_file: Path, task_id: str) -> bool:
     return True
 
 
+def rewrite_task(task_file: Path,
+                 task_id: str,
+                 *,
+                 new_text: str,
+                 new_section: Optional[str] = None) -> dict[str, str]:
+    if not task_file.exists():
+        return {}
+
+    cleaned_text = new_text.strip()
+    if not cleaned_text:
+        return {}
+
+    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    tasks = parse_tasks(task_file)
+    target = next((task for task in tasks if task.task_id == task_id), None)
+    if target is None:
+        return {}
+
+    cleaned_section = (new_section or target.section).strip() or target.section
+    original_line = lines[target.line_index]
+    match = TASK_LINE_RE.match(original_line)
+    if not match:
+        return {}
+
+    rewritten_line = "{0}{1}{2}{3}".format(
+        match.group(1),
+        match.group(2) or "",
+        cleaned_text,
+        match.group(4),
+    )
+    new_task_id = _stable_task_id(cleaned_section, cleaned_text)
+    remap = {target.task_id: new_task_id}
+
+    if cleaned_section == target.section:
+        if rewritten_line == original_line:
+            return {}
+        lines[target.line_index] = rewritten_line
+        task_file.write_text("".join(lines), encoding="utf-8")
+        return remap
+
+    header_indices = [
+        line_index
+        for line_index, line in enumerate(lines)
+        if _section_name_from_line(line) is not None
+    ]
+    header_index = next(
+        (
+            line_index
+            for line_index, line in enumerate(lines)
+            if _section_name_from_line(line) == cleaned_section
+        ),
+        None,
+    )
+
+    del lines[target.line_index]
+    if header_index is None:
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.append("# {0}\n".format(cleaned_section))
+        lines.append(rewritten_line if rewritten_line.endswith("\n") else rewritten_line + "\n")
+        task_file.write_text("".join(lines), encoding="utf-8")
+        return remap
+
+    next_header_index = next(
+        (line_index for line_index in header_indices if line_index > header_index),
+        len(lines),
+    )
+    insert_at = next_header_index
+    if target.line_index < insert_at:
+        insert_at -= 1
+
+    lines.insert(insert_at, rewritten_line)
+    task_file.write_text("".join(lines), encoding="utf-8")
+    return remap
+
+
 def move_task_to_board(task_file: Path, task_id: str, new_section: str) -> dict[str, str]:
     if not task_file.exists():
         return {}
@@ -277,6 +353,7 @@ def move_task_to_board(task_file: Path, task_id: str, new_section: str) -> dict[
     match = TASK_LINE_RE.match(original_line)
     if not match:
         return {}
+    moved_line = original_line
 
     header_indices = [
         line_index
@@ -308,7 +385,6 @@ def move_task_to_board(task_file: Path, task_id: str, new_section: str) -> dict[
     if target.line_index < insert_at:
         insert_at -= 1
 
-    moved_line = original_line
     del lines[target.line_index]
     lines.insert(insert_at, moved_line)
     task_file.write_text("".join(lines), encoding="utf-8")

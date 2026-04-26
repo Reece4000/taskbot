@@ -2074,15 +2074,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
             headline.setText(_taskbot_title_html())
             headline.setWordWrap(False)
             headline.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-            title_row.addWidget(headline, 0, Qt.AlignBottom)
+            title_row.addWidget(headline, 0, Qt.AlignVCenter)
 
             self.runtime_label = QLabel("")
             self.runtime_label.setObjectName("RuntimeLabel")
             self.runtime_label.setTextFormat(Qt.RichText)
             self.runtime_label.setWordWrap(False)
             self.runtime_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self.runtime_label.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
-            title_row.addWidget(self.runtime_label, 1, Qt.AlignBottom)
+            self.runtime_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            title_row.addWidget(self.runtime_label, 1, Qt.AlignVCenter)
 
             self.status_chip = QLabel("Idle")
             self.status_chip.setObjectName("StatusChip")

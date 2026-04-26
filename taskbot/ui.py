@@ -641,6 +641,26 @@ def _phase_label(phase: str) -> str:
     return PHASE_TITLES.get(phase, phase.replace("_", " ").title())
 
 
+def _board_summary_text(
+    tasks: List[StoredTask],
+    phase_order: List[str],
+    *,
+    board_count: Optional[int] = None,
+) -> str:
+    parts = ["{0} tasks".format(len(tasks))]
+    if board_count is not None:
+        parts.append("{0} boards".format(board_count))
+
+    phase_counts = {phase: 0 for phase in phase_order}
+    for task in tasks:
+        if task.phase in phase_counts:
+            phase_counts[task.phase] += 1
+
+    for phase in phase_order:
+        parts.append("{0} {1}".format(_phase_label(phase), phase_counts[phase]))
+    return " | ".join(parts)
+
+
 def _task_card_can_start_task(phase: str) -> bool:
     return phase in {"backlog", "planning"}
 
@@ -3788,15 +3808,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
             selected_title = self._selected_board_title()
             if selected_title:
                 self.board_title_label.setText(selected_title)
-                self.board_summary_label.setText("{0} tasks | {1} columns".format(len(tasks), len(self.phase_order)))
+                self.board_summary_label.setText(
+                    _board_summary_text(tasks, self.phase_order)
+                )
             else:
                 active_tasks = self._active_tasks(tasks)
                 self.board_title_label.setText("All Boards")
                 self.board_summary_label.setText(
-                    "{0} tasks | {1} boards | {2} columns".format(
-                        len(active_tasks),
-                        len(boards),
-                        len(self.phase_order),
+                    _board_summary_text(
+                        active_tasks,
+                        self.phase_order,
+                        board_count=len(boards),
                     )
                 )
 

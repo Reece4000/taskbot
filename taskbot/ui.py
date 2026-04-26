@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from taskbot.config import (
     discover_config_path,
@@ -252,6 +252,25 @@ def _terminal_text_should_refresh(
     current_terminal_text: str,
 ) -> bool:
     return last_terminal_text is None or current_terminal_text != last_terminal_text
+
+
+def _capture_modeless_dialog_value(dialog: Any, value_reader: Callable[[], Any]) -> Callable[[], Any]:
+    captured = {"ready": False, "value": None}
+    accepted_signal = getattr(dialog, "accepted", None)
+    connect = getattr(accepted_signal, "connect", None)
+    if callable(connect):
+        def capture() -> None:
+            captured["value"] = value_reader()
+            captured["ready"] = True
+
+        connect(capture)
+
+    def read_value() -> Any:
+        if captured["ready"]:
+            return captured["value"]
+        return value_reader()
+
+    return read_value
 
 
 def _boards_from_store_snapshot(store: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3634,10 +3653,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
             )
             active_config = self.active_config
             board_id = str(board.get("board_id", ""))
+            submitted_board_title = _capture_modeless_dialog_value(dialog, dialog.board_title)
 
             def accept_board() -> None:
                 try:
-                    updated = rename_board(active_config, board_id, dialog.board_title())
+                    updated = rename_board(active_config, board_id, submitted_board_title())
                 except Exception as exc:
                     QMessageBox.critical(self, "Failed To Rename Board", str(exc))
                     return

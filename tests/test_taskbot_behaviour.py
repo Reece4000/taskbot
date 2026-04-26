@@ -35,6 +35,7 @@ from taskbot.tasks import parse_tasks, rename_board as rename_markdown_board
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
     _board_header_title,
+    _capture_modeless_dialog_value,
     _board_summary_text,
     _command_enter_modifier,
     _command_enter_shortcut_sequences,
@@ -63,6 +64,28 @@ from taskbot.verification import VerificationResult, run_verification_steps
 
 
 class TaskbotBehaviourTests(unittest.TestCase):
+    class _FakeSignal:
+        def __init__(self) -> None:
+            self._callbacks = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self) -> None:
+            for callback in list(self._callbacks):
+                callback()
+
+    class _FakeAcceptedDialog:
+        def __init__(self, title: str) -> None:
+            self._title = title
+            self.accepted = TaskbotBehaviourTests._FakeSignal()
+
+        def board_title(self) -> str:
+            return self._title
+
+        def set_board_title(self, title: str) -> None:
+            self._title = title
+
     def _run_git(self, repo_root: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", *args],
@@ -444,6 +467,15 @@ class TaskbotBehaviourTests(unittest.TestCase):
             }
             self.assertEqual(boards_by_id[original["board_id"]], "Renamed Board")
             self.assertEqual(boards_by_id[recreated["board_id"]], "Old Board")
+
+    def test_capture_modeless_dialog_value_keeps_renamed_board_submission(self) -> None:
+        dialog = self._FakeAcceptedDialog("Renamed Board")
+        submitted_title = _capture_modeless_dialog_value(dialog, dialog.board_title)
+
+        dialog.accepted.emit()
+        dialog.set_board_title("Old Board")
+
+        self.assertEqual(submitted_title(), "Renamed Board")
 
     def test_terminal_refresh_cache_treats_repo_switch_to_blank_as_a_refresh(self) -> None:
         self.assertTrue(_terminal_text_should_refresh("previous repo output", ""))

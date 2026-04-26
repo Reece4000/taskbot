@@ -2,6 +2,8 @@
 
 `taskbot` is a thin local orchestration layer around the `codex` CLI.
 
+<img src="Taskbot.png" alt="Taskbot desktop UI screenshot" width="900" />
+
 It is designed to:
 
 - start a fresh Codex session for each planning/execution pass

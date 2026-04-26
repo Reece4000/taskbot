@@ -798,13 +798,13 @@ def _start_task_run_args(task_id: str) -> List[str]:
 
 def _taskbot_title_html() -> str:
     letters = [
-        ("T", "#c8643b"),
-        ("A", "#d07a34"),
-        ("S", "#d39b3c"),
-        ("K", "#c9a64b"),
-        ("B", "#6f9d5f"),
-        ("O", "#4f98a6"),
-        ("T", "#8b6bd1"),
+        ("T", "#9f4f2a"),
+        ("A", "#c86b2f"),
+        ("S", "#e1a13b"),
+        ("K", "#f0c86a"),
+        ("B", "#d8bc92"),
+        ("O", "#8b5a34"),
+        ("T", "#c47a3a"),
     ]
     return "".join(
         '<span style="color:{0};">{1}</span>'.format(color, html.escape(letter))

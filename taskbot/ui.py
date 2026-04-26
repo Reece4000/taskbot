@@ -437,6 +437,10 @@ def _command_enter_activate_candidate(candidate_widget: Any, button_cls: Any) ->
     if candidate_widget is None:
         return False
 
+    command_enter_submitter = getattr(candidate_widget, "_trigger_command_enter_submit", None)
+    if callable(command_enter_submitter):
+        return bool(command_enter_submitter())
+
     buttons: List[Any] = []
     find_children = getattr(candidate_widget, "findChildren", None)
     if callable(find_children):
@@ -1021,6 +1025,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
     class CommandEnterDialog(QDialog):
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__(parent)
+            self._command_enter_submit_in_progress = False
             self._command_enter_shortcuts = _install_command_enter_shortcuts(
                 self,
                 lambda: _command_enter_submit_dialog(self, self, QPushButton),
@@ -1028,6 +1033,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 QKeySequence,
                 Qt.WindowShortcut,
             )
+
+        def _trigger_command_enter_submit(self) -> bool:
+            if self._command_enter_submit_in_progress:
+                return True
+            self._command_enter_submit_in_progress = True
+            try:
+                self.accept()
+            finally:
+                if self.isVisible():
+                    self._command_enter_submit_in_progress = False
+            return True
 
     class CommandEnterModalFilter(QObject):
         def eventFilter(self, watched: QObject, event: Any) -> bool:
@@ -2019,23 +2035,28 @@ def launch_ui(config: Dict[str, Any]) -> int:
             super().__init__(parent)
             self._on_move_task_to_board = on_move_task_to_board
             self._drop_target_row = -1
+            self._drop_target_board_id = ""
             self.setAcceptDrops(True)
             self.setProperty("dropTargetRow", -1)
 
-        def _drop_target_row_for_event(self, event: Any) -> int:
+        def _drop_target_for_event(self, event: Any) -> tuple[int, str]:
             item = self.itemAt(event.position().toPoint())
             if item is None:
-                return -1
+                return -1, ""
             board_id = item.data(Qt.UserRole)
-            if not board_id:
-                return -1
-            return self.row(item)
+            if board_id is None:
+                return self.row(item), ""
+            return self.row(item), str(board_id).strip()
 
-        def _set_drop_target_row(self, row: int) -> None:
-            if row == self._drop_target_row:
+        def _set_drop_target(self, row: int, board_id: str) -> None:
+            board_id = board_id.strip()
+            if row == self._drop_target_row and board_id == self._drop_target_board_id:
                 return
+            if row == self._drop_target_row:
+                self._drop_target_board_id = board_id
             previous_row = self._drop_target_row
             self._drop_target_row = row
+            self._drop_target_board_id = board_id
             self.setProperty("dropTargetRow", row)
             for target_row in (previous_row, row):
                 if target_row < 0:
@@ -2045,27 +2066,28 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     self.viewport().update(self.visualItemRect(item))
 
         def _clear_drop_target_row(self) -> None:
-            self._set_drop_target_row(-1)
+            self._set_drop_target(-1, "")
 
         def _accepts_task_drop(self, event: Any) -> bool:
             task_id, _source_phase = _drag_payload_from_mime_data(event.mimeData())
             if not task_id or self._on_move_task_to_board is None:
                 return False
-            return self._drop_target_row_for_event(event) >= 0
+            _drop_target_row, board_id = self._drop_target_for_event(event)
+            return bool(board_id)
 
         def dragEnterEvent(self, event) -> None:
-            drop_target_row = self._drop_target_row_for_event(event)
-            if drop_target_row >= 0 and self._on_move_task_to_board is not None:
-                self._set_drop_target_row(drop_target_row)
+            drop_target_row, board_id = self._drop_target_for_event(event)
+            if board_id and self._on_move_task_to_board is not None:
+                self._set_drop_target(drop_target_row, board_id)
                 event.acceptProposedAction()
                 return
             self._clear_drop_target_row()
             event.ignore()
 
         def dragMoveEvent(self, event) -> None:
-            drop_target_row = self._drop_target_row_for_event(event)
-            if drop_target_row >= 0 and self._on_move_task_to_board is not None:
-                self._set_drop_target_row(drop_target_row)
+            drop_target_row, board_id = self._drop_target_for_event(event)
+            if board_id and self._on_move_task_to_board is not None:
+                self._set_drop_target(drop_target_row, board_id)
                 event.acceptProposedAction()
                 return
             self._clear_drop_target_row()
@@ -2076,23 +2098,19 @@ def launch_ui(config: Dict[str, Any]) -> int:
             super().dragLeaveEvent(event)
 
         def dropEvent(self, event) -> None:
-            self._clear_drop_target_row()
             if not self._accepts_task_drop(event):
+                self._clear_drop_target_row()
                 event.ignore()
                 return
 
-            item = self.itemAt(event.position().toPoint())
-            if item is None or self._on_move_task_to_board is None:
-                event.ignore()
-                return
-
-            board_id = item.data(Qt.UserRole)
-            if board_id is None:
+            board_id = self._drop_target_board_id
+            self._clear_drop_target_row()
+            if not board_id or self._on_move_task_to_board is None:
                 event.ignore()
                 return
 
             task_id, _source_phase = _drag_payload_from_mime_data(event.mimeData())
-            self._on_move_task_to_board(task_id, str(board_id))
+            self._on_move_task_to_board(task_id, board_id)
             event.setDropAction(Qt.MoveAction)
             event.acceptProposedAction()
 
@@ -3400,6 +3418,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def _show_modeless_dialog(self, dialog: QDialog, on_accepted: Any) -> None:
             self._open_dialogs.append(dialog)
+            dialog._taskbot_finish_handled = False
             dialog.finished.connect(
                 lambda result, current_dialog=dialog: self._finish_modeless_dialog(
                     current_dialog,
@@ -3413,6 +3432,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
             dialog.activateWindow()
 
         def _finish_modeless_dialog(self, dialog: QDialog, result: int, on_accepted: Any) -> None:
+            if getattr(dialog, "_taskbot_finish_handled", False):
+                return
+            dialog._taskbot_finish_handled = True
             try:
                 if result == QDialog.Accepted:
                     on_accepted()

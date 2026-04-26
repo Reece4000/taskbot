@@ -1,21 +1,31 @@
 from __future__ import annotations
 
+import io
 import json
 import re
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from taskbot.codex_cli import CodexRunResult
 from taskbot.config import DEFAULT_CONFIG, load_config, save_config_overrides
 from taskbot.git_integration import capture_git_session_state, publish_git_changes
-from taskbot.runner import _build_tiny_task_plan, _run_task_once, _should_fast_path_tiny_task
-from taskbot.store import StoredTask, create_task, update_task_fields
+from taskbot.runner import _build_tiny_task_plan, _cmd_doctor, _run_task_once, _should_fast_path_tiny_task
+from taskbot.store import (
+    StoredTask,
+    create_board,
+    create_task,
+    load_store_snapshot,
+    rename_board as rename_store_board,
+    update_task_fields,
+)
 from taskbot.tasks import parse_tasks, rename_board as rename_markdown_board
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
+    _command_enter_modifier,
     _command_enter_shortcut_sequences,
     _command_enter_dialog_candidate,
     _command_enter_should_activate,
@@ -26,10 +36,14 @@ from taskbot.ui import (
     _trash_icon_path,
     RUNNER_CONTROL_TOOLTIPS,
     _config_path_label_for_header,
+    _macos_command_line_tools_python,
     _repo_agents_path,
+    _start_task_run_args,
     _start_loop_run_args,
+    _task_card_can_start_task,
     _terminal_text_should_refresh,
     _taskbot_title_html,
+    _ui_launch_preflight_error,
 )
 from taskbot.verification import VerificationResult, run_verification_steps
 
@@ -185,7 +199,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
     def test_taskbot_title_html_uses_colored_letter_spans(self) -> None:
         title_html = _taskbot_title_html()
 
-        self.assertEqual(re.sub(r"<[^>]+>", "", title_html), "Taskbot")
+        self.assertEqual(re.sub(r"<[^>]+>", "", title_html), "TASKBOT")
         self.assertEqual(title_html.count("<span style=\"color:"), 7)
         self.assertTrue(title_html.startswith('<span style="color:#c8643b;">T'))
 
@@ -220,6 +234,44 @@ class TaskbotBehaviourTests(unittest.TestCase):
             self.assertEqual(remap, {original_task.task_id: renamed_task.task_id})
             self.assertEqual(renamed_task.section, "Renamed Board")
 
+    def test_rename_store_board_keeps_empty_board_identity_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str((repo_root / "_taskbot" / "_tasks.md").resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            created = create_board(config, "Old Board")
+            updated = rename_store_board(config, created["board_id"], "Renamed Board")
+            store = load_store_snapshot(config)
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated["board_id"], created["board_id"])
+            self.assertEqual(store["boards"][0]["board_id"], created["board_id"])
+            self.assertEqual(store["boards"][0]["title"], "Renamed Board")
+
+    def test_rename_store_board_keeps_populated_board_tasks_on_the_same_board(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            task_file = repo_root / "_taskbot" / "_tasks.md"
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text("# Old Board\n- First task\n", encoding="utf-8")
+
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str(task_file.resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            created = create_board(config, "Old Board")
+            updated = rename_store_board(config, created["board_id"], "Renamed Board")
+            store = load_store_snapshot(config)
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(task_file.read_text(encoding="utf-8"), "# Renamed Board\n- First task\n")
+            self.assertEqual(store["boards"][0]["board_id"], created["board_id"])
+            self.assertEqual(store["boards"][0]["title"], "Renamed Board")
+            self.assertEqual(store["tasks"][0]["board_id"], created["board_id"])
+            self.assertEqual(store["tasks"][0]["board_title"], "Renamed Board")
+
     def test_terminal_refresh_cache_treats_repo_switch_to_blank_as_a_refresh(self) -> None:
         self.assertTrue(_terminal_text_should_refresh("previous repo output", ""))
         self.assertTrue(_terminal_text_should_refresh(None, ""))
@@ -249,6 +301,19 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertEqual(
             _start_loop_run_args(False, START_LOOP_DIALOG_DEFAULT_ITERATIONS),
             ["run", "--iterations", "5"],
+        )
+
+    def test_task_card_start_task_is_limited_to_backlog_and_planning(self) -> None:
+        self.assertTrue(_task_card_can_start_task("backlog"))
+        self.assertTrue(_task_card_can_start_task("planning"))
+        self.assertFalse(_task_card_can_start_task("ready"))
+        self.assertFalse(_task_card_can_start_task("in_progress"))
+        self.assertFalse(_task_card_can_start_task("completed"))
+
+    def test_start_task_runner_args_target_a_single_task_id(self) -> None:
+        self.assertEqual(
+            _start_task_run_args("engineering-1234"),
+            ["run", "--task-id", "engineering-1234"],
         )
 
     def test_command_enter_shortcuts_cover_return_and_enter(self) -> None:
@@ -284,15 +349,21 @@ class TaskbotBehaviourTests(unittest.TestCase):
             "window-shortcut",
         )
 
-        self.assertEqual(_command_enter_shortcut_sequences(), ("Meta+Return", "Meta+Enter"))
+        self.assertEqual(_command_enter_shortcut_sequences(), ("Ctrl+Return", "Ctrl+Enter"))
         self.assertEqual(shortcuts, created)
         self.assertEqual([shortcut.key_sequence for shortcut in shortcuts], [
-            "sequence:Meta+Return",
-            "sequence:Meta+Enter",
+            "sequence:Ctrl+Return",
+            "sequence:Ctrl+Enter",
         ])
         self.assertEqual([shortcut.parent for shortcut in shortcuts], ["dialog-parent", "dialog-parent"])
         self.assertEqual([shortcut.context for shortcut in shortcuts], ["window-shortcut", "window-shortcut"])
         self.assertTrue(all(shortcut.activated.connected is callback for shortcut in shortcuts))
+
+    def test_command_enter_modifier_uses_passed_qt_namespace(self) -> None:
+        class FakeQt:
+            ControlModifier = 0x10
+
+        self.assertEqual(_command_enter_modifier(FakeQt), 0x10)
 
     def test_command_enter_preferred_button_prefers_ok_label_over_default(self) -> None:
         class FakeButton:
@@ -454,7 +525,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
         cancel_button = FakeButton("Cancel")
         dialog = FakeDialog([cancel_button, ok_button])
 
-        self.assertTrue(_command_enter_submit_dialog(dialog, None, FakeButton))
+        self.assertTrue(_command_enter_submit_dialog(None, dialog, FakeButton))
         self.assertEqual(ok_button.clicked, 1)
         self.assertEqual(cancel_button.clicked, 0)
 
@@ -496,7 +567,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
         cancel_button = FakeButton("Cancel")
         dialog = FakeDialog([cancel_button], default_button)
 
-        self.assertTrue(_command_enter_submit_dialog(dialog, None, FakeButton))
+        self.assertTrue(_command_enter_submit_dialog(None, dialog, FakeButton))
         self.assertEqual(default_button.clicked, 1)
         self.assertEqual(cancel_button.clicked, 0)
 
@@ -513,6 +584,67 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertEqual(icon_path.name, "trash-can.svg")
         self.assertTrue(icon_path.exists())
         self.assertTrue(icon_path.is_file())
+
+    def test_ui_launch_preflight_blocks_headless_macos_sessions(self) -> None:
+        with patch("taskbot.ui.os.getenv", return_value=""), patch(
+            "taskbot.ui.sys.platform",
+            "darwin",
+        ), patch("taskbot.ui._macos_window_server_available", return_value=False):
+            error = _ui_launch_preflight_error()
+
+        self.assertIsNotNone(error)
+        self.assertIn("WindowServer", error or "")
+        self.assertIn("TASKBOT_UI_ALLOW_HEADLESS=1", error or "")
+
+    def test_ui_launch_preflight_allows_headless_override(self) -> None:
+        with patch("taskbot.ui.os.getenv", return_value="1"), patch(
+            "taskbot.ui.sys.platform",
+            "darwin",
+        ), patch("taskbot.ui._macos_window_server_available", return_value=False):
+            self.assertIsNone(_ui_launch_preflight_error())
+
+    def test_macos_command_line_tools_python_detection_matches_apple_runtime(self) -> None:
+        with patch("taskbot.ui.sys.platform", "darwin"), patch(
+            "taskbot.ui.sys.executable",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+        ), patch(
+            "taskbot.ui.sys.base_prefix",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9",
+        ):
+            self.assertTrue(_macos_command_line_tools_python())
+
+    def test_doctor_reports_ui_launch_constraints_on_macos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+
+            with patch("taskbot.runner.sys.platform", "darwin"), patch(
+                "taskbot.ui._ui_launch_preflight_error",
+                return_value="No active macOS desktop session was detected.",
+            ), patch(
+                "taskbot.ui._macos_command_line_tools_python",
+                return_value=True,
+            ), patch(
+                "taskbot.runner.shutil.which",
+                return_value="/usr/local/bin/codex",
+            ), patch(
+                "taskbot.runner.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["codex", "--version"],
+                    0,
+                    stdout="codex 1.2.3\n",
+                    stderr="",
+                ),
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    exit_code = _cmd_doctor(config)
+
+        self.assertEqual(exit_code, 0)
+        doctor_output = output.getvalue()
+        self.assertIn("ui_launch    blocked", doctor_output)
+        self.assertIn("ui_reason No active macOS desktop session was detected.", doctor_output)
+        self.assertIn("python_gui   apple-clt", doctor_output)
 
     def test_manual_verification_skips_command_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -566,11 +698,19 @@ class TaskbotBehaviourTests(unittest.TestCase):
             "planning": {"auto_plan_tiny_tasks": True},
             "verification": DEFAULT_CONFIG["verification"],
         }
-        file_hints = [("taskbot/ui.py", ["launch_ui"], 18.0)]
+        file_hints = [
+            ("taskbot/ui.py", ["launch_ui"], 18.0),
+            ("taskbot/ui/dialogs.py", ["open_dialog"], 17.5),
+            ("taskbot/ui/widgets.py", ["render_widget"], 17.0),
+            ("taskbot/ui/theme.py", ["apply_theme"], 16.5),
+        ]
 
         self.assertTrue(_should_fast_path_tiny_task(task, file_hints, config))
         plan = _build_tiny_task_plan(task, file_hints, config)
-        self.assertEqual(plan["relevant_files"], ["taskbot/ui.py"])
+        self.assertEqual(
+            plan["relevant_files"],
+            ["taskbot/ui.py", "taskbot/ui/dialogs.py", "taskbot/ui/widgets.py"],
+        )
         self.assertFalse(plan["decomposition"]["should_split"])
         self.assertIn("skip a separate planning pass", plan["summary"])
 
@@ -632,9 +772,8 @@ class TaskbotBehaviourTests(unittest.TestCase):
         }
         file_hints = [
             ("taskbot/ui.py", ["launch_ui"], 18.0),
-            ("taskbot/ui/dialogs.py", ["open_dialog"], 17.5),
-            ("taskbot/ui/widgets.py", ["render_widget"], 16.0),
-            ("taskbot/runner.py", ["_run_task_once"], 15.0),
+            ("taskbot/store.py", ["StoredTask"], 17.5),
+            ("taskbot/runner.py", ["_run_task_once"], 16.0),
         ]
 
         self.assertFalse(_should_fast_path_tiny_task(task, file_hints, config))

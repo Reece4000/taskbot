@@ -206,6 +206,50 @@ def _tiny_task_relevant_files(task: StoredTask,
     return relevant_files[:limit]
 
 
+def _tiny_task_scope_files(task: StoredTask,
+                           file_hints: List[Any],
+                           *,
+                           limit: int) -> List[str]:
+    return _tiny_task_relevant_files(task, file_hints, limit=limit)
+
+
+def _tiny_task_area_key(rel_path: str) -> Optional[str]:
+    normalised = str(rel_path).strip().replace("\\", "/").strip("/")
+    if not normalised:
+        return None
+    if normalised.startswith("tests/"):
+        return None
+
+    suffix = Path(normalised).suffix.lower()
+    if suffix in {".md", ".rst", ".txt", ".json", ".yaml", ".yml"}:
+        return None
+
+    parts = normalised.split("/")
+    if len(parts) == 1:
+        stem = Path(parts[0]).stem
+        return stem or parts[0]
+
+    if parts[0] == "taskbot":
+        if len(parts) == 2:
+            stem = Path(parts[1]).stem
+            return "taskbot/{0}".format(stem or parts[1])
+        return "taskbot/{0}".format(parts[1])
+
+    return parts[0]
+
+
+def _tiny_task_area_keys(file_paths: List[str]) -> List[str]:
+    seen = set()
+    area_keys: List[str] = []
+    for rel_path in file_paths:
+        area_key = _tiny_task_area_key(rel_path)
+        if area_key is None or area_key in seen:
+            continue
+        seen.add(area_key)
+        area_keys.append(area_key)
+    return area_keys
+
+
 def _contains_tiny_task_planning_intent(text: str) -> bool:
     return any(pattern.search(text) for pattern in TINY_TASK_PLANNING_INTENT_PATTERNS)
 
@@ -239,7 +283,20 @@ def _should_fast_path_tiny_task(task: StoredTask,
         return False
 
     relevant_files = _tiny_task_relevant_files(task, file_hints)
-    if not relevant_files or len(relevant_files) > 3:
+    if not relevant_files:
+        return False
+
+    scope_files = _tiny_task_scope_files(task, file_hints, limit=8)
+    app_scope_files = [path for path in scope_files if _tiny_task_area_key(path) is not None]
+
+    area_keys = _tiny_task_area_keys(app_scope_files)
+    if len(area_keys) > 1:
+        return False
+
+    if area_keys:
+        if len(app_scope_files) > 6:
+            return False
+    elif len(scope_files) > 4:
         return False
 
     text_hits = sum(1 for token in TINY_TASK_TEXT_HINTS if token in text)
@@ -255,7 +312,7 @@ def _should_fast_path_tiny_task(task: StoredTask,
 def _build_tiny_task_plan(task: StoredTask,
                           file_hints: List[Any],
                           config: Dict[str, Any]) -> Dict[str, Any]:
-    relevant_files = _tiny_task_relevant_files(task, file_hints, limit=3)
+    relevant_files = _tiny_task_scope_files(task, file_hints, limit=3)
     verification_mode = _verification_mode(config)
     verification_lines: List[str] = []
     if verification_mode == "manual" or not _enabled_verification_commands(config):
@@ -925,6 +982,14 @@ def _run_task_once(config: Dict[str, Any],
 
 def _cmd_doctor(config: Dict[str, Any]) -> int:
     ensure_task_store(config)
+    ui_preflight_error: Optional[str] = None
+    macos_clt_python = False
+    if sys.platform == "darwin":
+        from taskbot.ui import _macos_command_line_tools_python, _ui_launch_preflight_error
+
+        ui_preflight_error = _ui_launch_preflight_error()
+        macos_clt_python = _macos_command_line_tools_python()
+
     checks = {
         "app_root": Path(config["app_root"]).exists(),
         "repo_root": Path(config["repo_root"]).exists(),
@@ -949,6 +1014,13 @@ def _cmd_doctor(config: Dict[str, Any]) -> int:
         if key == "pyside6" and not ok:
             suffix = "optional"
         print("{0:12} {1}".format(key, suffix))
+    if ui_preflight_error is None:
+        print("{0:12} ok".format("ui_launch"))
+    else:
+        print("{0:12} blocked".format("ui_launch"))
+        print("ui_reason", ui_preflight_error)
+    if sys.platform == "darwin":
+        print("{0:12} {1}".format("python_gui", "apple-clt" if macos_clt_python else "ok"))
     print("{0:12} {1}".format("task_file", "ok" if task_file_exists else "optional"))
     print("selected_repo", config["repo_root"])
     if str(config.get("config_path", "")).strip():

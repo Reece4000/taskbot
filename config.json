@@ -22,10 +22,10 @@
   },
   "models": {
     "planner": "gpt-5.4",
-    "implementer": "gpt-5.4-mini",
+    "implementer": "gpt-5.4",
     "reviewer": "gpt-5.4-mini",
     "planner_reasoning_effort": "xhigh",
-    "implementer_reasoning_effort": "high"
+    "implementer_reasoning_effort": "medium"
   },
   "codex": {
     "sandbox": "workspace-write",
@@ -104,7 +104,7 @@
   "git": {
     "enabled": true,
     "push_after_commit": true,
-    "require_clean_worktree": true,
+    "require_clean_worktree": false,
     "remote": "",
     "commit_message_template": "taskbot: {task_id} {task_title}"
   },

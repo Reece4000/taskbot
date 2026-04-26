@@ -302,6 +302,8 @@ def _ensure_board(store: Dict[str, Any], board_title: str, order_hint: int) -> s
         existing["title"] = board_title
         existing["order"] = min(int(existing.get("order", order_hint) or order_hint), order_hint)
     _ensure_special_boards(store)
+    if existing is not None:
+        return str(existing.get("board_id", board_id))
     return board_id
 
 

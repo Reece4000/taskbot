@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import html
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -94,6 +96,58 @@ ANSI_FG_COLORS = {
     96: "#7cdce8",
     97: "#f3f7fb",
 }
+
+
+def _macos_window_server_available() -> bool:
+    if sys.platform != "darwin":
+        return True
+
+    try:
+        application_services = ctypes.CDLL(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        core_graphics = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+    except OSError:
+        return True
+
+    session_copy = application_services.CGSessionCopyCurrentDictionary
+    session_copy.restype = ctypes.c_void_p
+    main_display = core_graphics.CGMainDisplayID
+    main_display.restype = ctypes.c_uint32
+    return bool(session_copy()) and int(main_display()) != 0
+
+
+def _macos_command_line_tools_python() -> bool:
+    if sys.platform != "darwin":
+        return False
+
+    marker = "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework"
+    for candidate in (sys.executable, sys.base_prefix):
+        try:
+            resolved = str(Path(candidate).resolve())
+        except OSError:
+            resolved = str(candidate)
+        if resolved.startswith(marker):
+            return True
+    return False
+
+
+def _ui_launch_preflight_error() -> Optional[str]:
+    allow_headless = os.getenv("TASKBOT_UI_ALLOW_HEADLESS", "").strip().lower()
+    if allow_headless in {"1", "true", "yes"}:
+        return None
+
+    if sys.platform == "darwin" and not _macos_window_server_available():
+        return (
+            "No active macOS desktop session was detected. Qt crashes during startup "
+            "when it cannot reach WindowServer, so the Taskbot UI cannot launch from "
+            "this shell. Start it from a logged-in desktop session, or for headless "
+            "automation set TASKBOT_UI_ALLOW_HEADLESS=1 and QT_QPA_PLATFORM=offscreen."
+        )
+
+    return None
 
 
 def _ansi_state_to_css(state: Dict[str, Any]) -> str:
@@ -303,7 +357,12 @@ def _start_loop_run_args(run_indefinitely: bool, iterations: int) -> List[str]:
 
 
 def _command_enter_shortcut_sequences() -> tuple[str, str]:
-    return ("Meta+Return", "Meta+Enter")
+    return ("Ctrl+Return", "Ctrl+Enter")
+
+
+def _command_enter_modifier(qt_namespace: Any) -> Any:
+    # Qt maps macOS Command to ControlModifier for shortcut matching.
+    return qt_namespace.ControlModifier
 
 
 def _install_command_enter_shortcuts(
@@ -463,6 +522,14 @@ def _phase_label(phase: str) -> str:
     return PHASE_TITLES.get(phase, phase.replace("_", " ").title())
 
 
+def _task_card_can_start_task(phase: str) -> bool:
+    return phase in {"backlog", "planning"}
+
+
+def _start_task_run_args(task_id: str) -> List[str]:
+    return ["run", "--task-id", task_id]
+
+
 def _taskbot_title_html() -> str:
     letters = [
         ("T", "#c8643b"),
@@ -480,6 +547,11 @@ def _taskbot_title_html() -> str:
 
 
 def launch_ui(config: Dict[str, Any]) -> int:
+    preflight_error = _ui_launch_preflight_error()
+    if preflight_error is not None:
+        print(preflight_error, file=sys.stderr)
+        return 1
+
     try:
         from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData, QRect
         from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette
@@ -775,7 +847,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 event,
                 (QEvent.ShortcutOverride, QEvent.KeyPress),
                 (Qt.Key_Return, Qt.Key_Enter),
-                Qt.MetaModifier,
+                _command_enter_modifier(Qt),
             ):
                 return super().eventFilter(watched, event)
 
@@ -1442,47 +1514,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def loop_run_args(self) -> List[str]:
             return _start_loop_run_args(self.run_indefinitely(), self.iteration_count())
 
-    class _ElidingLabel(QLabel):
-        def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
-            super().__init__(parent)
-            self._full_text = ""
-            self._elide_mode = Qt.ElideRight
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.setMinimumWidth(0)
-            if text:
-                self.setText(text)
-
-        def setText(self, text: str) -> None:
-            self._full_text = str(text)
-            self.setToolTip(self._full_text)
-            self._refresh_text()
-
-        def resizeEvent(self, event) -> None:
-            super().resizeEvent(event)
-            self._refresh_text()
-
-        def changeEvent(self, event) -> None:
-            super().changeEvent(event)
-            if event.type() in (QEvent.FontChange, QEvent.StyleChange, QEvent.PaletteChange):
-                self._refresh_text()
-
-        def _refresh_text(self) -> None:
-            available_width = max(0, self.contentsRect().width())
-            if not self._full_text:
-                super().setText("")
-                return
-            if available_width <= 0:
-                super().setText(self._full_text)
-                return
-            elided_text = self.fontMetrics().elidedText(self._full_text, self._elide_mode, available_width)
-            if elided_text != super().text():
-                super().setText(elided_text)
-
     class TaskCard(QFrame):
         def __init__(self,
                      task: StoredTask,
                      *,
-                     show_board: bool,
+                     on_start_task: Any = None,
                      on_edit: Any,
                      on_delete: Any,
                      on_move_task: Any = None,
@@ -1491,6 +1527,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._task_id = task.task_id
             self._task_board_id = task.board_id
             self._task_phase = task.phase
+            self._on_start_task = on_start_task
             self._on_edit = on_edit
             self._on_delete = on_delete
             self._on_move_task = on_move_task
@@ -1509,19 +1546,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 9, 12, 9)
             layout.setSpacing(5)
-
-            top_row = QHBoxLayout()
-            top_row.setContentsMargins(0, 0, 0, 0)
-            top_row.setSpacing(6)
-
-            if show_board:
-                board_badge = QLabel(task.board_title)
-                board_badge.setObjectName("BoardBadge")
-                board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                top_row.addWidget(board_badge, 0, Qt.AlignLeft)
-
-            top_row.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
-            layout.addLayout(top_row)
 
             title = QLabel(task.title)
             title.setObjectName("TaskTitle")
@@ -1545,12 +1569,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             footer_row.setContentsMargins(0, 0, 0, 0)
             footer_row.setSpacing(8)
 
-            if show_board:
-                board_badge = _ElidingLabel(task.board_title)
-                board_badge.setObjectName("BoardBadge")
-                board_badge.setTextFormat(Qt.PlainText)
-                board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                footer_row.addWidget(board_badge, 1)
+            board_badge = QLabel(task.board_title)
+            board_badge.setObjectName("BoardBadge")
+            board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            footer_row.addWidget(board_badge, 1)
 
             meta_parts = [task.task_id[:8]]
             meta_parts.append("ready" if task.plan_status == "ready" else "pending")
@@ -1584,9 +1606,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             self._on_move_task_to_board(self._task_id, "archived")
 
+        def _start_task(self) -> None:
+            if self._on_start_task is None:
+                return
+            self._on_start_task(self._task_id)
+
         def _show_context_menu(self, global_pos: Any) -> None:
             menu = QMenu(self)
             copy_action = menu.addAction("Copy Card ID")
+            start_action = None
+            if _task_card_can_start_task(self._task_phase):
+                start_action = menu.addAction("Start Task")
             edit_action = menu.addAction("Edit Card")
             archive_action = menu.addAction("Archive Card")
             delete_action = menu.addAction("Delete Card")
@@ -1597,6 +1627,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             action = menu.exec(global_pos)
             if action == copy_action:
                 self._copy_task_id()
+            elif action == start_action:
+                self._start_task()
             elif action == edit_action:
                 self._on_edit()
             elif action == archive_action and archive_action.isEnabled():
@@ -1698,6 +1730,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         _title_role = Qt.UserRole + 1
         _count_role = Qt.UserRole + 2
         _text_padding = 24
+        _drop_target_role = "dropTargetRow"
 
         def initStyleOption(self, option, index) -> None:
             super().initStyleOption(option, index)
@@ -1726,6 +1759,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def paint(self, painter, option, index) -> None:
             super().paint(painter, option, index)
 
+            view = self.parent()
+            try:
+                drop_target_row = int(view.property(self._drop_target_role)) if view is not None else -1
+            except (TypeError, ValueError):
+                drop_target_row = -1
+            if index.row() == drop_target_row:
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                rect = option.rect.adjusted(2, 2, -2, -2)
+                fill = QColor("#f5ddcf")
+                fill.setAlpha(150)
+                border = QColor("#c8643b")
+                border.setAlpha(190)
+                painter.setPen(border)
+                painter.setBrush(fill)
+                painter.drawRoundedRect(rect, 4, 4)
+                painter.restore()
+
             board_id = str(index.data(Qt.UserRole) or "")
             title = str(index.data(self._title_role) or "")
             if board_id != "archived" and title.lower() != "archived":
@@ -1741,49 +1792,76 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def __init__(self, on_move_task_to_board: Any, parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self._on_move_task_to_board = on_move_task_to_board
+            self._drop_target_row = -1
             self.setAcceptDrops(True)
+            self.setProperty("dropTargetRow", -1)
+
+        def _drop_target_row_for_event(self, event: Any) -> int:
+            item = self.itemAt(event.position().toPoint())
+            if item is None:
+                return -1
+            board_id = item.data(Qt.UserRole)
+            if not board_id:
+                return -1
+            return self.row(item)
+
+        def _set_drop_target_row(self, row: int) -> None:
+            if row == self._drop_target_row:
+                return
+            previous_row = self._drop_target_row
+            self._drop_target_row = row
+            self.setProperty("dropTargetRow", row)
+            for target_row in (previous_row, row):
+                if target_row < 0:
+                    continue
+                item = self.item(target_row)
+                if item is not None:
+                    self.viewport().update(self.visualItemRect(item))
+
+        def _clear_drop_target_row(self) -> None:
+            self._set_drop_target_row(-1)
 
         def _accepts_task_drop(self, event: Any) -> bool:
             task_id, _source_phase = _drag_payload_from_mime_data(event.mimeData())
             if not task_id or self._on_move_task_to_board is None:
                 return False
-            item = self.itemAt(event.position().toPoint())
-            if item is None:
-                return False
-            board_id = item.data(Qt.UserRole)
-            return board_id is not None
+            return self._drop_target_row_for_event(event) >= 0
 
         def dragEnterEvent(self, event) -> None:
-            if self._accepts_task_drop(event):
-                _set_drag_highlight(self, True)
+            drop_target_row = self._drop_target_row_for_event(event)
+            if drop_target_row >= 0 and self._on_move_task_to_board is not None:
+                self._set_drop_target_row(drop_target_row)
                 event.acceptProposedAction()
                 return
+            self._clear_drop_target_row()
             event.ignore()
 
         def dragMoveEvent(self, event) -> None:
-            if self._accepts_task_drop(event):
-                _set_drag_highlight(self, True)
+            drop_target_row = self._drop_target_row_for_event(event)
+            if drop_target_row >= 0 and self._on_move_task_to_board is not None:
+                self._set_drop_target_row(drop_target_row)
                 event.acceptProposedAction()
                 return
+            self._clear_drop_target_row()
             event.ignore()
 
         def dragLeaveEvent(self, event) -> None:
-            _set_drag_highlight(self, False)
+            self._clear_drop_target_row()
             super().dragLeaveEvent(event)
 
         def dropEvent(self, event) -> None:
-            _set_drag_highlight(self, False)
+            self._clear_drop_target_row()
             if not self._accepts_task_drop(event):
                 event.ignore()
                 return
 
             item = self.itemAt(event.position().toPoint())
-            if item is None:
+            if item is None or self._on_move_task_to_board is None:
                 event.ignore()
                 return
 
             board_id = item.data(Qt.UserRole)
-            if board_id is None or self._on_move_task_to_board is None:
+            if board_id is None:
                 event.ignore()
                 return
 
@@ -1833,7 +1911,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def set_tasks(self,
                       tasks: List[StoredTask],
                       *,
-                      show_board: bool,
+                      on_start_task: Any,
                       on_edit_task: Any,
                       on_delete_task: Any,
                       on_move_task: Any,
@@ -1859,7 +1937,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.body_layout.addWidget(
                     TaskCard(
                         task,
-                        show_board=show_board,
+                        on_start_task=on_start_task,
                         on_edit=lambda _checked=False, current_task=task: on_edit_task(current_task),
                         on_delete=lambda _checked=False, current_task=task: on_delete_task(current_task),
                         on_move_task=on_move_task,
@@ -2492,11 +2570,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 border: 1px solid #e2d6c7;
                 border-radius: 4px;
                 padding: 3px;
-            }
-
-            QListWidget#BoardList[dragOver="true"] {
-                background: #f8efe6;
-                border: 1px solid #c8643b;
             }
 
             QListWidget#BoardList::item {
@@ -3376,9 +3449,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
             self.refresh_view()
 
-        def _move_task_to_phase(self, task: StoredTask, phase: str) -> None:
+        def _move_task_to_phase(self, task: StoredTask | str, phase: str) -> None:
+            task_id = task.task_id if isinstance(task, StoredTask) else str(task).strip()
+            if not task_id:
+                QMessageBox.critical(self, "Failed To Update Task", "Task could not be found.")
+                return
             try:
-                updated = update_task_phase(self.active_config, task.task_id, phase)
+                updated = update_task_phase(self.active_config, task_id, phase)
             except Exception as exc:
                 QMessageBox.critical(self, "Failed To Update Task", str(exc))
                 return
@@ -3419,6 +3496,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.status_note = "Moved task {0} to {1}".format(updated.task_id, updated.board_title)
             _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
             self.refresh_view()
+
+        def _start_task(self, task_id: str) -> None:
+            self._spawn_runner(_start_task_run_args(task_id))
 
         def _spawn_runner(self, args: List[str]) -> None:
             runtime_path = self._runtime_path()
@@ -3494,6 +3574,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             selected_board_id = self.selected_board_id
             vertical_value, horizontal_value = self._capture_scroll_state(self.board_list)
+            self.board_list._clear_drop_target_row()
             self.board_list.blockSignals(True)
             self.board_list.clear()
 
@@ -3553,12 +3634,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if selected_board_id:
                 visible_tasks = [task for task in tasks if task.board_id == selected_board_id]
 
-            show_board = selected_board_id is None
             for phase in self.phase_order:
                 phase_tasks = [task for task in visible_tasks if task.phase == phase]
                 self.phase_columns[phase].set_tasks(
                     phase_tasks,
-                    show_board=show_board,
+                    on_start_task=self._start_task,
                     on_edit_task=self._open_edit_task_dialog,
                     on_delete_task=self._delete_task,
                     on_move_task=self._move_task_to_phase,

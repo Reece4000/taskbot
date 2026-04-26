@@ -88,6 +88,11 @@ Then launch:
 python3 taskbot.py ui
 ```
 
+Notes:
+
+- The desktop UI needs a real desktop session. On macOS, launching it from a headless or SSH shell will make Qt abort before Python can catch the failure; `taskbot.py ui` now exits early with a diagnostic instead.
+- If you created the virtualenv from Apple Command Line Tools `/usr/bin/python3` and the UI is still unstable in a normal desktop session, recreate the venv with an official Python build such as Homebrew or python.org Python.
+
 The desktop UI provides:
 
 - a repository selector across the top

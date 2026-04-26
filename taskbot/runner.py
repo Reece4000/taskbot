@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from taskbot.codex_cli import CodexRunResult, run_codex_exec
 from taskbot.config import discover_config_path, ensure_runtime_directories, load_config
+from taskbot.git_integration import capture_git_session_state, publish_git_changes
 from taskbot.indexer import build_repo_index, rank_files_for_task
 from taskbot.prompts import build_implementation_prompt, build_plan_prompt
 from taskbot.store import (
@@ -441,6 +442,21 @@ def _verification_summary(results: List[VerificationResult]) -> Dict[str, Any]:
     }
 
 
+def _log_git_result(config: Dict[str, Any], result: Dict[str, Any]) -> None:
+    status = str(result.get("status", "unknown")).strip() or "unknown"
+    branch = str(result.get("branch", "")).strip()
+    commit_sha = str(result.get("commit_sha", "")).strip()
+    reason = str(result.get("reason", "")).strip()
+    message_parts = ["status={0}".format(status)]
+    if branch:
+        message_parts.append("branch={0}".format(branch))
+    if commit_sha:
+        message_parts.append("commit={0}".format(commit_sha[:12]))
+    if reason:
+        message_parts.append(reason)
+    _emit_line(config, _banner(config, "git", " | ".join(message_parts)))
+
+
 def _run_plan_for_task(config: Dict[str, Any],
                        task: StoredTask,
                        *,
@@ -622,6 +638,7 @@ def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: b
     )
     history = _read_recent_history(config, task)
     _write_run_snapshot(artifact_dir, task, file_hints, history)
+    git_session = capture_git_session_state(repo_root, config)
 
     active_task = update_task_phase(
         config,
@@ -711,12 +728,42 @@ def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: b
         last_error="" if verification["all_passed"] else "verification failed",
     )
 
+    git_result_payload: Dict[str, Any]
+    if verification["all_passed"] and final_phase != "blocked":
+        git_result = publish_git_changes(
+            repo_root,
+            config,
+            artifact_dir,
+            active_task,
+            report,
+            final_phase,
+            git_session,
+        )
+        git_result_payload = git_result.to_payload()
+    else:
+        git_result_payload = {
+            "status": "not_run",
+            "reason": "git integration runs only after a successful implementation and verification pass",
+            "branch": "",
+            "remote": "",
+            "commit_message": "",
+            "commit_sha": "",
+            "changed_files": [],
+            "dirty_at_start": False,
+            "commit_created": False,
+            "push_attempted": False,
+            "push_succeeded": False,
+        }
+    _write_json(artifact_dir / "git.result.json", git_result_payload)
+    _log_git_result(config, git_result_payload)
+
     summary = {
         "task_id": active_task.task_id,
         "status": str(report.get("status", "unknown")),
         "summary": str(report.get("summary", "")),
         "mark_task_result": mark_task_result,
         "verification": verification,
+        "git": git_result_payload,
         "artifact_dir": str(artifact_dir),
         "started_at": datetime.now().isoformat(timespec="seconds"),
     }

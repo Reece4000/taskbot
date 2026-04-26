@@ -96,5 +96,12 @@
   },
   "verification": {
     "commands": []
+  },
+  "git": {
+    "enabled": false,
+    "push_after_commit": true,
+    "require_clean_worktree": true,
+    "remote": "",
+    "commit_message_template": "taskbot: {task_id} {task_title}"
   }
 }

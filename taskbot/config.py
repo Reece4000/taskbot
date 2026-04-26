@@ -99,6 +99,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "instructions": "",
         "commands": [],
     },
+    "git": {
+        "enabled": False,
+        "push_after_commit": True,
+        "require_clean_worktree": True,
+        "remote": "",
+        "commit_message_template": "taskbot: {task_id} {task_title}",
+    },
 }
 
 

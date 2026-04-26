@@ -160,6 +160,21 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
+def _task_boundary_config(base_config: Dict[str, Any]) -> Dict[str, Any]:
+    repo_root = Path(base_config["repo_root"]).resolve()
+    configured_path = str(base_config.get("config_path", "")).strip()
+    explicit_config = Path(configured_path).resolve() if configured_path else None
+    config_path = discover_config_path(APP_ROOT, repo_root, explicit_config)
+    refreshed = load_config(repo_root, config_path, app_root=APP_ROOT)
+
+    # Keep the active runner bound to its original runtime and control paths.
+    for key in ("state_dir", "artifact_dir", "control_dir"):
+        refreshed[key] = base_config[key]
+    refreshed.setdefault("ui", {})
+    refreshed["ui"]["terminal_log"] = str(terminal_log_path(base_config))
+    return refreshed
+
+
 def _task_summary(task: StoredTask) -> str:
     return "{0} [{1}] {2}".format(task.board_title, task.phase, task.title)
 
@@ -1195,9 +1210,6 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
     _clear_stop(config)
     stop_flag = {"requested": False}
     interrupt_state = {"requested": False}
-    include_needs_testing = bool(
-        args.include_needs_testing or config.get("selection", {}).get("include_needs_testing", False)
-    )
 
     def handle_signal(signum: int, _frame: Any) -> None:
         stop_flag["requested"] = True
@@ -1212,12 +1224,17 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
         iterations = None if args.continuous else int(args.iterations or config["loop"]["default_iterations"])
         completed = 0
         while True:
-            if stop_flag["requested"] or _stop_requested(config):
+            task_config = _task_boundary_config(config)
+
+            if stop_flag["requested"] or _stop_requested(task_config):
                 _emit_line(config, "stop requested; exiting after current boundary")
                 break
 
+            include_needs_testing = bool(
+                args.include_needs_testing or task_config.get("selection", {}).get("include_needs_testing", False)
+            )
             task = _select_task(
-                config,
+                task_config,
                 task_id=args.task_id,
                 include_needs_testing=include_needs_testing,
                 text_query=args.query,
@@ -1228,7 +1245,7 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
             try:
                 summary = _run_task_once(
-                    config,
+                    task_config,
                     task,
                     rebuild_index=args.rebuild_index,
                     interrupt_state=interrupt_state,
@@ -1238,7 +1255,7 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
                     _emit_line(config, "task {0} interrupted".format(task.task_id), stderr=True)
                     break
                 update_task_phase(
-                    config,
+                    task_config,
                     task.task_id,
                     "blocked",
                     last_result_status="blocked",
@@ -1249,17 +1266,17 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
                 _emit_line(config, error_line, stderr=True)
                 if args.task_id:
                     raise
-                time.sleep(float(config["loop"]["sleep_seconds"]))
+                time.sleep(float(task_config["loop"]["sleep_seconds"]))
                 continue
 
             print(json.dumps(summary, indent=2, sort_keys=True))
-            append_terminal_log(config, json.dumps(summary, indent=2, sort_keys=True))
+            append_terminal_log(task_config, json.dumps(summary, indent=2, sort_keys=True))
             completed += 1
             if args.task_id:
                 break
             if iterations is not None and completed >= iterations:
                 break
-            time.sleep(float(config["loop"]["sleep_seconds"]))
+            time.sleep(float(task_config["loop"]["sleep_seconds"]))
     finally:
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)

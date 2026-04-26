@@ -11,10 +11,16 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from taskbot.codex_cli import CodexRunResult
+from taskbot.codex_cli import CodexRunResult, _is_zero_match_search_failure, analyze_codex_failure
 from taskbot.config import DEFAULT_CONFIG, load_config, save_config_overrides
 from taskbot.git_integration import capture_git_session_state, publish_git_changes
-from taskbot.runner import _build_tiny_task_plan, _cmd_doctor, _run_task_once, _should_fast_path_tiny_task
+from taskbot.runner import (
+    _approval_response_path as _runner_approval_response_path,
+    _build_tiny_task_plan,
+    _cmd_doctor,
+    _run_task_once,
+    _should_fast_path_tiny_task,
+)
 from taskbot.store import (
     StoredTask,
     create_board,
@@ -49,6 +55,8 @@ from taskbot.ui import (
     _task_card_can_start_task,
     _terminal_text_should_refresh,
     _taskbot_title_html,
+    _pending_approval_request,
+    _write_approval_response,
     _ui_launch_preflight_error,
 )
 from taskbot.verification import VerificationResult, run_verification_steps
@@ -984,6 +992,175 @@ class TaskbotBehaviourTests(unittest.TestCase):
         ]
 
         self.assertFalse(_should_fast_path_tiny_task(task, file_hints, config))
+
+    def test_zero_match_search_failures_are_ignored(self) -> None:
+        result = CodexRunResult(
+            command=["codex", "exec"],
+            exit_code=1,
+            stdout="",
+            stderr="",
+            last_message_text="",
+            parsed_output=None,
+            json_events=[
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "/bin/zsh -lc 'rg -n \"missing\" tests/test_taskbot_behaviour.py'",
+                        "exit_code": 1,
+                    },
+                }
+            ],
+        )
+
+        analysis = analyze_codex_failure(result)
+
+        self.assertTrue(_is_zero_match_search_failure(result.json_events[0]["item"]["command"], 1))
+        self.assertEqual(len(analysis.ignored_failures), 1)
+        self.assertEqual(len(analysis.actionable_failures), 0)
+        self.assertFalse(analysis.permission_related)
+
+    def test_permission_failure_analysis_marks_permission_related_commands(self) -> None:
+        result = CodexRunResult(
+            command=["codex", "exec"],
+            exit_code=1,
+            stdout="",
+            stderr="tool call blocked by sandbox policy",
+            last_message_text="",
+            parsed_output=None,
+            json_events=[
+                {"type": "error", "message": "Command blocked by sandbox; broader permissions required."},
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "cat /root/secret.txt",
+                        "exit_code": 126,
+                    },
+                },
+            ],
+        )
+
+        analysis = analyze_codex_failure(result)
+
+        self.assertTrue(analysis.permission_related)
+        self.assertEqual(len(analysis.actionable_failures), 1)
+        self.assertEqual(analysis.actionable_failures[0].command, "cat /root/secret.txt")
+
+    def test_write_approval_response_uses_control_dir_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control_dir = Path(tmp)
+
+            response_path = _write_approval_response(control_dir, "req-123", True, "ui")
+
+            self.assertEqual(response_path, _runner_approval_response_path({"control_dir": str(control_dir)}, "req-123"))
+            payload = json.loads(response_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["approved"])
+            self.assertEqual(payload["request_id"], "req-123")
+            self.assertEqual(payload["source"], "ui")
+
+    def test_pending_approval_request_requires_pending_status_and_id(self) -> None:
+        self.assertIsNone(_pending_approval_request({}))
+        self.assertIsNone(_pending_approval_request({"approval_request": {"status": "done", "id": "req-1"}}))
+        self.assertEqual(
+            _pending_approval_request({"approval_request": {"status": "pending", "id": "req-1"}}),
+            {"status": "pending", "id": "req-1"},
+        )
+
+    def test_runner_retries_permission_failures_once_with_broader_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+            task = create_task(
+                config,
+                board_title="General",
+                title="Retry permission failure once",
+                phase="ready",
+            )
+            task = update_task_fields(
+                config,
+                task.task_id,
+                plan_status="ready",
+                plan={"summary": "Existing implementation plan"},
+            ) or task
+
+            calls: List[Dict[str, Any]] = []
+
+            def fake_run_codex_phase(
+                config_arg,
+                repo_root_arg,
+                *,
+                model,
+                reasoning_effort,
+                prompt,
+                artifact_dir,
+                phase_name,
+                sandbox_override=None,
+                approval_override=None,
+                output_schema,
+                interrupt_state=None,
+            ) -> CodexRunResult:
+                calls.append(
+                    {
+                        "phase_name": phase_name,
+                        "sandbox_override": sandbox_override,
+                        "approval_override": approval_override,
+                    }
+                )
+                if len(calls) == 1:
+                    (artifact_dir / "implement.stdout.log").write_text("first attempt\n", encoding="utf-8")
+                    return CodexRunResult(
+                        command=["codex", "exec", "implement"],
+                        exit_code=1,
+                        stdout="",
+                        stderr="sandbox denied command",
+                        last_message_text="",
+                        parsed_output=None,
+                        json_events=[
+                            {"type": "error", "message": "Sandbox blocked the requested command."},
+                            {
+                                "type": "item.completed",
+                                "item": {
+                                    "type": "command_execution",
+                                    "command": "cat /root/secret.txt",
+                                    "exit_code": 126,
+                                },
+                            },
+                        ],
+                    )
+                return CodexRunResult(
+                    command=["codex", "exec", "implement"],
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    last_message_text="",
+                    parsed_output={
+                        "status": "needs_testing",
+                        "summary": "Retried with temporary broader access.",
+                        "files_touched": [],
+                        "tests_run": [],
+                        "follow_up_items": [],
+                        "mark_task_as": "needs_testing",
+                    },
+                    json_events=[],
+                )
+
+            with patch("taskbot.runner._run_codex_phase", side_effect=fake_run_codex_phase), patch(
+                "taskbot.runner._request_phase_retry_approval",
+                return_value=True,
+            ), patch(
+                "taskbot.runner.run_verification_steps",
+                return_value=[],
+            ):
+                summary = _run_task_once(config, task, rebuild_index=False)
+
+            self.assertEqual(summary["status"], "needs_testing")
+            self.assertEqual(len(calls), 2)
+            self.assertIsNone(calls[0]["sandbox_override"])
+            self.assertEqual(calls[1]["sandbox_override"], "danger-full-access")
+            self.assertEqual(calls[1]["approval_override"], "on-request")
+            artifact_dir = Path(summary["artifact_dir"])
+            self.assertTrue((artifact_dir / "implement.attempt1.stdout.log").exists())
 
     def test_repo_agents_path_prefers_existing_repo_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

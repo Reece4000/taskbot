@@ -213,6 +213,40 @@ def _path_signature(path: Path) -> tuple[bool, int, int]:
     return (True, stat_result.st_mtime_ns, stat_result.st_size)
 
 
+def _approval_response_path(control_dir: str | Path, request_id: str) -> Path:
+    return Path(control_dir) / "approval-response-{0}.json".format(request_id)
+
+
+def _pending_approval_request(runtime_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    approval_request = runtime_payload.get("approval_request")
+    if not isinstance(approval_request, dict):
+        return None
+    request_id = str(approval_request.get("id", "")).strip()
+    if not request_id:
+        return None
+    if str(approval_request.get("status", "pending")).strip().lower() != "pending":
+        return None
+    return approval_request
+
+
+def _write_approval_response(control_dir: str | Path, request_id: str, approved: bool, source: str) -> Path:
+    response_path = _approval_response_path(control_dir, request_id)
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    response_path.write_text(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "approved": bool(approved),
+                "source": str(source).strip() or "ui",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return response_path
+
+
 def _terminal_text_should_refresh(
     last_terminal_text: Optional[str],
     current_terminal_text: str,
@@ -2245,6 +2279,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._cached_boards: List[Dict[str, Any]] = []
             self._cached_tasks: List[StoredTask] = []
             self._cached_runtime_payload: Dict[str, Any] = {}
+            self._handled_approval_request_ids: set[str] = set()
             self._last_rendered_selected_board_id: str | None | object = object()
             self._last_rendered_board_search_query: str | object = object()
             self._open_dialogs: List[QDialog] = []
@@ -3212,6 +3247,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._cached_boards = []
             self._cached_tasks = []
             self._cached_runtime_payload = {}
+            self._handled_approval_request_ids.clear()
             self._last_terminal_text = None
             self._last_rendered_selected_board_id = object()
             self._last_rendered_board_search_query = object()
@@ -3326,6 +3362,38 @@ def launch_ui(config: Dict[str, Any]) -> int:
             except json.JSONDecodeError:
                 return {"phase": "runtime unreadable"}
             return payload if isinstance(payload, dict) else {}
+
+        def _respond_to_approval_request(self, request_id: str, approved: bool, source: str = "ui") -> None:
+            _write_approval_response(self.active_config["control_dir"], request_id, approved, source)
+
+        def _maybe_prompt_for_approval_request(self, runtime_payload: Dict[str, Any]) -> None:
+            approval_request = _pending_approval_request(runtime_payload)
+            if approval_request is None:
+                return
+            request_id = str(approval_request.get("id", "")).strip()
+            if not request_id or request_id in self._handled_approval_request_ids:
+                return
+            if _approval_response_path(self.active_config["control_dir"], request_id).exists():
+                self._handled_approval_request_ids.add(request_id)
+                return
+
+            self._handled_approval_request_ids.add(request_id)
+            task_id = str(approval_request.get("task_id", "")).strip()
+            phase_name = str(approval_request.get("phase", "")).strip() or "current"
+            message = str(approval_request.get("message", "")).strip()
+            prompt = message or "This runner phase needs a one-off broader retry."
+            answer = QMessageBox.question(
+                self,
+                "One-Off Approval Required",
+                "{0}\n\nAllow task {1} to retry the {2} phase once with broader Codex access?".format(
+                    prompt,
+                    task_id or "the active task",
+                    phase_name,
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            self._respond_to_approval_request(request_id, answer == QMessageBox.Yes)
 
         def _selected_board_title(self) -> Optional[str]:
             item = self.board_list.currentItem()
@@ -4009,6 +4077,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             boards = self._cached_boards
             tasks = self._cached_tasks
             runtime_payload = self._cached_runtime_payload
+            self._maybe_prompt_for_approval_request(runtime_payload)
             self._update_status_header(boards, tasks, runtime_payload)
             if store_changed:
                 self._populate_board_list(boards, tasks)

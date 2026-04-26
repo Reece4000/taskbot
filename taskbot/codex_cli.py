@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import threading
@@ -22,6 +23,22 @@ class CodexRunResult:
     last_message_text: str
     parsed_output: Optional[Dict[str, Any]]
     json_events: List[Dict[str, Any]]
+
+
+@dataclass
+class CommandExecutionFailure:
+    command: str
+    exit_code: int
+    ignored: bool
+    reason: str = ""
+
+
+@dataclass
+class CodexFailureAnalysis:
+    message: str
+    permission_related: bool
+    actionable_failures: List[CommandExecutionFailure]
+    ignored_failures: List[CommandExecutionFailure]
 
 
 ANSI_RESET = "\033[0m"
@@ -109,6 +126,118 @@ def _format_agent_message(text: str) -> str:
     return json.dumps(parsed, indent=2, ensure_ascii=False)
 
 
+def _extract_command_text(command: str) -> str:
+    stripped = str(command).strip()
+    if not stripped:
+        return ""
+    try:
+        parts = shlex.split(stripped)
+    except ValueError:
+        return stripped
+    if len(parts) >= 3 and Path(parts[0]).name in {"sh", "bash", "zsh"} and parts[1] in {"-c", "-lc"}:
+        return str(parts[2]).strip()
+    return stripped
+
+
+def _is_zero_match_search_failure(command: str, exit_code: Any) -> bool:
+    try:
+        numeric_exit = int(exit_code)
+    except (TypeError, ValueError):
+        return False
+    if numeric_exit != 1:
+        return False
+
+    command_text = _extract_command_text(command)
+    if not command_text:
+        return False
+    try:
+        parts = shlex.split(command_text)
+    except ValueError:
+        parts = command_text.split()
+    if not parts:
+        return False
+
+    tool = Path(parts[0]).name
+    if tool not in {"rg", "grep", "git-grep"}:
+        return False
+    return True
+
+
+_PERMISSION_FAILURE_PATTERNS = (
+    "approval policy",
+    "ask for approval",
+    "requires approval",
+    "permission denied",
+    "not permitted",
+    "not allowed",
+    "broader permissions",
+    "sandbox",
+    "danger-full-access",
+    "read-only",
+    "workspace-write",
+    "escalat",
+)
+
+
+def analyze_codex_failure(result: CodexRunResult) -> CodexFailureAnalysis:
+    ignored_failures: List[CommandExecutionFailure] = []
+    actionable_failures: List[CommandExecutionFailure] = []
+    message = ""
+
+    for event in result.json_events:
+        event_type = str(event.get("type", ""))
+        if not message and event_type == "error":
+            message = str(event.get("message", "")).strip()
+        if not message and event_type == "turn.failed":
+            error_payload = event.get("error", {})
+            if isinstance(error_payload, dict):
+                message = str(error_payload.get("message", "")).strip()
+
+        item = event.get("item", {})
+        if not isinstance(item, dict) or str(item.get("type", "")) != "command_execution":
+            continue
+        if event_type != "item.completed":
+            continue
+        exit_code = item.get("exit_code")
+        try:
+            numeric_exit = int(exit_code)
+        except (TypeError, ValueError):
+            continue
+        if numeric_exit == 0:
+            continue
+        command = str(item.get("command", "")).strip()
+        ignored = _is_zero_match_search_failure(command, numeric_exit)
+        failure = CommandExecutionFailure(
+            command=command,
+            exit_code=numeric_exit,
+            ignored=ignored,
+            reason="zero-match search" if ignored else "",
+        )
+        if ignored:
+            ignored_failures.append(failure)
+        else:
+            actionable_failures.append(failure)
+
+    combined_text = "\n".join(
+        part
+        for part in (
+            message,
+            result.last_message_text,
+            result.stderr,
+            result.stdout,
+            "\n".join(failure.command for failure in actionable_failures),
+        )
+        if str(part).strip()
+    ).lower()
+    permission_related = any(pattern in combined_text for pattern in _PERMISSION_FAILURE_PATTERNS)
+    return CodexFailureAnalysis(
+        message=message,
+        permission_related=permission_related,
+        actionable_failures=actionable_failures,
+        ignored_failures=ignored_failures,
+    )
+
+
 def _render_json_event(phase_name: str,
                        event: Dict[str, Any],
                        stream_commands: bool,
@@ -184,7 +313,7 @@ def _render_json_event(phase_name: str,
             )
         if event_type == "item.completed":
             exit_code = item.get("exit_code")
-            if exit_code not in (0, None):
+            if exit_code not in (0, None) and not _is_zero_match_search_failure(command, exit_code):
                 return "{0} {1} ({2}): {3}".format(
                     prefix,
                     _style("cmd failed", ANSI_BOLD, ANSI_RED, enabled=ansi_enabled),
@@ -242,6 +371,8 @@ def run_codex_exec(repo_root: Path,
                    prompt: str,
                    artifact_dir: Path,
                    phase_name: str,
+                   sandbox_override: Optional[str] = None,
+                   approval_override: Optional[str] = None,
                    output_schema: Optional[Path] = None,
                    on_process_started: Optional[Callable[[subprocess.Popen[Any], List[str]], None]] = None,
                    on_process_finished: Optional[Callable[[], None]] = None,
@@ -263,7 +394,7 @@ def run_codex_exec(repo_root: Path,
     command = [
         "codex",
         "-a",
-        str(codex_config.get("ask_for_approval", "never")),
+        str(approval_override or codex_config.get("ask_for_approval", "never")),
     ]
     cleaned_reasoning_effort = "" if reasoning_effort is None else str(reasoning_effort).strip()
     if cleaned_reasoning_effort:
@@ -277,7 +408,7 @@ def run_codex_exec(repo_root: Path,
             "-m",
             model,
             "--sandbox",
-            str(codex_config["sandbox"]),
+            str(sandbox_override or codex_config["sandbox"]),
             "--color",
             str(codex_config["color"]),
             "--json",

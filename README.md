@@ -125,6 +125,7 @@ Verification is repo-local. Configure it in either `taskbot.config.json` or `<re
 - `verification.mode = "commands"` runs the configured command list after implementation.
 - `verification.instructions` lets you store repo-specific testing guidance for the agent.
 - `models.planner_reasoning_effort` and `models.implementer_reasoning_effort` accept `low`, `medium`, `high`, `xhigh`, or a blank value to inherit Codex's current reasoning behavior.
+- If a phase hits a real sandbox or approval-style tool failure, taskbot can ask for a one-off retry with broader Codex access for that phase only. Harmless zero-match `rg` or `grep` probes do not trigger this prompt.
 
 Terminal color output is controlled by `codex.stream_ansi` in taskbot config:
 

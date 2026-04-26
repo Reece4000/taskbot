@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from taskbot.codex_cli import CodexRunResult, run_codex_exec
+from taskbot.codex_cli import CodexRunResult, analyze_codex_failure, run_codex_exec
 from taskbot.config import discover_config_path, ensure_runtime_directories, load_config
 from taskbot.git_integration import capture_git_session_state, publish_git_changes
 from taskbot.indexer import build_repo_index, rank_files_for_task
@@ -430,6 +430,10 @@ def _stop_path(config: Dict[str, Any]) -> Path:
     return Path(config["control_dir"]) / "stop"
 
 
+def _approval_response_path(config: Dict[str, Any], request_id: str) -> Path:
+    return Path(config["control_dir"]) / "approval-response-{0}.json".format(request_id)
+
+
 def _pid_is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -497,6 +501,93 @@ def _clear_runtime(config: Dict[str, Any]) -> None:
         runtime_path.unlink()
 
 
+def _preserve_phase_artifacts(artifact_dir: Path, phase_name: str, attempt_label: str) -> None:
+    for suffix in ("stdout.log", "stderr.log", "last_message.json"):
+        source = artifact_dir / "{0}.{1}".format(phase_name, suffix)
+        if not source.exists():
+            continue
+        target = artifact_dir / "{0}.{1}.{2}".format(phase_name, attempt_label, suffix)
+        if target.exists():
+            target.unlink()
+        source.replace(target)
+
+
+def _inline_approval_available() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)()) and bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def _request_phase_retry_approval(config: Dict[str, Any],
+                                  *,
+                                  task: StoredTask,
+                                  phase_name: str,
+                                  analysis_message: str,
+                                  interrupt_state: Optional[Dict[str, bool]] = None) -> bool:
+    request_id = "{0}-{1}-{2}".format(task.task_id, phase_name, _now_stamp())
+    response_path = _approval_response_path(config, request_id)
+    if response_path.exists():
+        response_path.unlink()
+
+    request_payload = {
+        "id": request_id,
+        "task_id": task.task_id,
+        "task_title": task.title,
+        "phase": phase_name,
+        "message": analysis_message,
+        "sandbox": "danger-full-access",
+        "approval_policy": "on-request",
+        "requested_at": datetime.now().isoformat(timespec="seconds"),
+        "status": "pending",
+    }
+    _update_runtime(config, {"approval_request": request_payload})
+    _emit_line(
+        config,
+        _banner(
+            config,
+            "approval",
+            "{0} phase needs a one-off broader retry".format(phase_name),
+        ),
+    )
+
+    try:
+        if _inline_approval_available():
+            prompt = (
+                "{0}\nAllow a one-off retry for task {1} using sandbox=danger-full-access and approval=on-request? [y/N]: "
+            ).format(analysis_message, task.task_id)
+            try:
+                answer = input(prompt)
+            except EOFError:
+                answer = ""
+            approved = answer.strip().lower() in {"y", "yes"}
+            response_path.write_text(
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "approved": approved,
+                        "source": "tty",
+                        "responded_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return approved
+
+        while True:
+            if interrupt_state and interrupt_state.get("requested"):
+                raise RuntimeError("approval wait interrupted")
+            if _stop_requested(config):
+                raise RuntimeError("approval wait stopped")
+            if response_path.exists():
+                payload = _load_json(response_path)
+                return bool(isinstance(payload, dict) and payload.get("approved"))
+            time.sleep(0.25)
+    finally:
+        _clear_runtime_field(config, "approval_request")
+        if response_path.exists():
+            response_path.unlink()
+
+
 def _stop_requested(config: Dict[str, Any]) -> bool:
     return _stop_path(config).exists()
 
@@ -554,17 +645,8 @@ def _write_run_snapshot(artifact_dir: Path,
 
 def _validate_phase_result(phase: str, result: CodexRunResult) -> None:
     if result.exit_code != 0:
-        message = ""
-        for event in result.json_events:
-            if event.get("type") == "error":
-                message = str(event.get("message", "")).strip()
-                break
-            if event.get("type") == "turn.failed":
-                error_payload = event.get("error", {})
-                if isinstance(error_payload, dict):
-                    message = str(error_payload.get("message", "")).strip()
-                    break
-
+        analysis = analyze_codex_failure(result)
+        message = analysis.message
         detail = " See {0}.stdout.log and {0}.stderr.log".format(phase)
         if message:
             detail += ". Error: {0}".format(message)
@@ -587,6 +669,8 @@ def _run_codex_phase(config: Dict[str, Any],
                      prompt: str,
                      artifact_dir: Path,
                      phase_name: str,
+                     sandbox_override: Optional[str] = None,
+                     approval_override: Optional[str] = None,
                      output_schema: Optional[Path],
                      interrupt_state: Optional[Dict[str, bool]] = None) -> CodexRunResult:
     def on_process_started(process: subprocess.Popen[Any], command: List[str]) -> None:
@@ -616,10 +700,76 @@ def _run_codex_phase(config: Dict[str, Any],
         prompt=prompt,
         artifact_dir=artifact_dir,
         phase_name=phase_name,
+        sandbox_override=sandbox_override,
+        approval_override=approval_override,
         output_schema=output_schema,
         on_process_started=on_process_started,
         on_process_finished=on_process_finished,
         should_terminate=should_terminate,
+    )
+
+
+def _execute_phase_with_retry(config: Dict[str, Any],
+                              repo_root: Path,
+                              *,
+                              task: StoredTask,
+                              model: str,
+                              reasoning_effort: Optional[str],
+                              prompt: str,
+                              artifact_dir: Path,
+                              phase_name: str,
+                              output_schema: Optional[Path],
+                              interrupt_state: Optional[Dict[str, bool]] = None) -> CodexRunResult:
+    result = _run_codex_phase(
+        config,
+        repo_root,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        prompt=prompt,
+        artifact_dir=artifact_dir,
+        phase_name=phase_name,
+        output_schema=output_schema,
+        interrupt_state=interrupt_state,
+    )
+    if result.exit_code == 0:
+        return result
+
+    analysis = analyze_codex_failure(result)
+    if not analysis.permission_related:
+        return result
+
+    summary_bits = []
+    if analysis.message:
+        summary_bits.append(analysis.message)
+    elif analysis.actionable_failures:
+        summary_bits.append("Tool command failed: {0}".format(analysis.actionable_failures[0].command))
+    summary_bits.append("Taskbot can retry this phase once with broader Codex access.")
+    approval_message = " ".join(bit for bit in summary_bits if bit).strip()
+
+    if not _request_phase_retry_approval(
+        config,
+        task=task,
+        phase_name=phase_name,
+        analysis_message=approval_message,
+        interrupt_state=interrupt_state,
+    ):
+        raise RuntimeError(
+            "approval denied for one-off {0} retry after permission-related tool failure".format(phase_name)
+        )
+
+    _preserve_phase_artifacts(artifact_dir, phase_name, "attempt1")
+    return _run_codex_phase(
+        config,
+        repo_root,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        prompt=prompt,
+        artifact_dir=artifact_dir,
+        phase_name=phase_name,
+        sandbox_override="danger-full-access",
+        approval_override="on-request",
+        output_schema=output_schema,
+        interrupt_state=interrupt_state,
     )
 
 
@@ -713,9 +863,10 @@ def _run_plan_for_task(config: Dict[str, Any],
         }
 
     prompt = build_plan_prompt(repo_root, config, refreshed_task, file_hints, history)
-    plan_result = _run_codex_phase(
+    plan_result = _execute_phase_with_retry(
         config,
         repo_root,
+        task=refreshed_task,
         model=planner_model,
         reasoning_effort=_configured_reasoning_effort(config, "planner"),
         prompt=prompt,
@@ -898,9 +1049,10 @@ def _run_task_once(config: Dict[str, Any],
         ],
     )
     implementation_prompt = build_implementation_prompt(repo_root, config, active_task, file_hints, history, dict(active_task.plan))
-    implementation_result = _run_codex_phase(
+    implementation_result = _execute_phase_with_retry(
         config,
         repo_root,
+        task=active_task,
         model=implementer_model,
         reasoning_effort=_configured_reasoning_effort(config, "implementer"),
         prompt=implementation_prompt,

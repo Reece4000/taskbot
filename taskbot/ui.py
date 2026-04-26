@@ -2242,13 +2242,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._cached_tasks: List[StoredTask] = []
             self._cached_runtime_payload: Dict[str, Any] = {}
             self._last_rendered_selected_board_id: str | None | object = object()
+            self._last_rendered_board_search_query: str | object = object()
             self._open_dialogs: List[QDialog] = []
             self.active_config = self._initial_config()
             self.selected_board_id = self._initial_board_id()
+            self.board_search_query = ""
             self.terminal_font_family = _preferred_monospace_family()
             self.phase_order: List[str] = []
             self.phase_columns: Dict[str, PhaseColumn] = {}
             self.board_shell: QFrame
+            self.board_search_input: QLineEdit
             self.stage_shell: QFrame
             self.stage_scrollbar: QScrollBar
 
@@ -2458,6 +2461,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_title_stack.addWidget(self.board_summary_label)
             board_header_layout.addLayout(board_title_stack)
             board_header_layout.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
+
+            self.board_search_input = QLineEdit()
+            self.board_search_input.setClearButtonEnabled(True)
+            self.board_search_input.setPlaceholderText("Filter cards by title")
+            self.board_search_input.setMaximumWidth(240)
+            self.board_search_input.textChanged.connect(self._on_board_search_changed)
+            board_header_layout.addWidget(self.board_search_input)
 
             self.add_task_button = QPushButton("+ Task")
             self.add_task_button.setObjectName("AccentButton")
@@ -3188,6 +3198,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._cached_runtime_payload = {}
             self._last_terminal_text = None
             self._last_rendered_selected_board_id = object()
+            self._last_rendered_board_search_query = object()
 
         def _refresh_store_cache(self) -> bool:
             current_signature = _path_signature(store_path(self.active_config))
@@ -3317,6 +3328,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _active_tasks(self, tasks: List[StoredTask]) -> List[StoredTask]:
             return [task for task in tasks if task.board_id != "archived"]
 
+        def _visible_board_tasks(self, tasks: List[StoredTask]) -> List[StoredTask]:
+            visible_tasks = self._active_tasks(tasks)
+            if self.selected_board_id is not None:
+                visible_tasks = [task for task in tasks if task.board_id == self.selected_board_id]
+            if not self.board_search_query:
+                return visible_tasks
+            return [
+                task for task in visible_tasks
+                if self.board_search_query in task.title.lower()
+            ]
+
         def _board_from_item(self, item: QListWidgetItem | None) -> Optional[Dict[str, Any]]:
             if item is None:
                 return None
@@ -3410,6 +3432,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self._rebuild_phase_columns(new_phase_order)
 
             self.selected_board_id = None
+            self._reset_board_search()
             self.status_note = "Loaded repo {0}".format(repo_root.name)
             self._invalidate_refresh_cache()
             self._refresh_repo_widgets()
@@ -3776,6 +3799,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.status_note = "Stop requested"
             self.refresh_view()
 
+        def _on_board_search_changed(self, value: str) -> None:
+            self.board_search_query = value.strip().lower()
+            self.refresh_view()
+
+        def _reset_board_search(self) -> None:
+            self.board_search_query = ""
+            self.board_search_input.blockSignals(True)
+            self.board_search_input.clear()
+            self.board_search_input.blockSignals(False)
+
         def _on_board_selection_changed(self,
                                         current: QListWidgetItem | None,
                                         _previous: QListWidgetItem | None) -> None:
@@ -3871,11 +3904,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 )
 
         def _refresh_columns(self, tasks: List[StoredTask]) -> None:
-            selected_board_id = self.selected_board_id
             vertical_value, horizontal_value = self._capture_scroll_state(self.columns_scroll)
-            visible_tasks = self._active_tasks(tasks)
-            if selected_board_id:
-                visible_tasks = [task for task in tasks if task.board_id == selected_board_id]
+            visible_tasks = self._visible_board_tasks(tasks)
 
             for phase in self.phase_order:
                 phase_tasks = [task for task in visible_tasks if task.phase == phase]
@@ -3952,13 +3982,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self._populate_board_list(boards, tasks)
 
             selection_changed = self.selected_board_id != self._last_rendered_selected_board_id
-            if store_changed or selection_changed:
-                visible_tasks = self._active_tasks(tasks) if self.selected_board_id is None else [
-                    task for task in tasks if task.board_id == self.selected_board_id
-                ]
+            filter_changed = self.board_search_query != self._last_rendered_board_search_query
+            if store_changed or selection_changed or filter_changed:
+                visible_tasks = self._visible_board_tasks(tasks)
                 self._update_board_header(visible_tasks, boards)
                 self._refresh_columns(tasks)
                 self._last_rendered_selected_board_id = self.selected_board_id
+                self._last_rendered_board_search_query = self.board_search_query
                 QTimer.singleShot(0, self._sync_stage_scrollbar)
 
             self._refresh_terminal()

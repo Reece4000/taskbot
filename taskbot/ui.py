@@ -33,7 +33,7 @@ from taskbot.store import (
     store_path,
     update_task_phase,
 )
-from taskbot.terminal_stream import terminal_log_path
+from taskbot.terminal_stream import read_terminal_tail, terminal_log_path
 
 
 PHASE_TITLES = {
@@ -4091,9 +4091,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if not current_signature[0]:
                 text = ""
             else:
-                text = "\n".join(
-                    path.read_text(encoding="utf-8", errors="ignore").splitlines()[-tail_lines:]
-                )
+                text = read_terminal_tail(path, tail_lines)
             if not _terminal_text_should_refresh(self._last_terminal_text, text):
                 return
 

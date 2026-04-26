@@ -226,7 +226,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
 
         self.assertEqual(
             _board_summary_text([planning_task, ready_task], ["planning", "ready", "completed"]),
-            "2 tasks | Planning 1 | Ready 1 | Completed 0",
+            "Planning 1 | Ready 1 | Completed 0",
         )
 
     def test_board_summary_text_for_all_boards_keeps_board_count(self) -> None:
@@ -242,7 +242,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
                 ["backlog", "completed"],
                 board_count=3,
             ),
-            "2 tasks | 3 boards | Backlog 1 | Completed 1",
+            "3 boards | Backlog 1 | Completed 1",
         )
 
     def test_board_summary_text_preserves_custom_phase_order_with_zero_counts(self) -> None:
@@ -251,7 +251,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
 
         self.assertEqual(
             _board_summary_text([blocked_task], ["blocked", "needs_testing", "completed"]),
-            "1 tasks | Blocked 1 | Needs Testing 0 | Completed 0",
+            "Blocked 1 | Needs Testing 0 | Completed 0",
         )
 
     def test_board_header_title_appends_total_task_count(self) -> None:

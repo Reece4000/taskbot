@@ -685,7 +685,7 @@ def _board_summary_text(
     *,
     board_count: Optional[int] = None,
 ) -> str:
-    parts = ["{0} tasks".format(len(tasks))]
+    parts: List[str] = []
     if board_count is not None:
         parts.append("{0} boards".format(board_count))
 
@@ -2404,7 +2404,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
             agents_button = QPushButton("Agents")
             agents_button.clicked.connect(self._open_agents_dialog)
             repo_row.addWidget(agents_button)
-            header_stack.addLayout(repo_row)
 
             controls_panel = QWidget()
             controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -2435,6 +2434,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.stop_button.setToolTip(RUNNER_CONTROL_TOOLTIPS["stop"])
             self.stop_button.clicked.connect(self._request_stop)
             controls_row.addWidget(self.stop_button)
+
+            repo_header_divider = QFrame()
+            repo_header_divider.setObjectName("HeaderDivider")
+            repo_header_divider.setFrameShape(QFrame.VLine)
+            repo_header_divider.setFrameShadow(QFrame.Plain)
+            repo_header_divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            repo_header_divider.setFixedWidth(1)
+            repo_row.addWidget(repo_header_divider)
+            repo_row.addWidget(controls_panel)
+            header_stack.addLayout(repo_row)
 
             top_layout.addLayout(header_stack)
 
@@ -2498,15 +2507,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.board_title_label.setObjectName("BoardTitle")
             board_title_row.addWidget(self.board_title_label)
             board_title_row.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
-
-            self.board_search_input = QLineEdit()
-            self.board_search_input.setObjectName("BoardSearchInput")
-            self.board_search_input.setClearButtonEnabled(True)
-            self.board_search_input.setPlaceholderText("Filter cards by title")
-            self.board_search_input.setMaximumWidth(240)
-            self.board_search_input.setFixedHeight(28)
-            self.board_search_input.textChanged.connect(self._on_board_search_changed)
-            board_title_row.addWidget(self.board_search_input)
             board_title_stack.addLayout(board_title_row)
 
             self.board_summary_label = QLabel("")
@@ -2532,7 +2532,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_header_divider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
             board_header_divider.setFixedWidth(1)
             board_header_layout.addWidget(board_header_divider)
-            board_header_layout.addWidget(controls_panel)
+
+            self.board_search_input = QLineEdit()
+            self.board_search_input.setObjectName("BoardSearchInput")
+            self.board_search_input.setClearButtonEnabled(True)
+            self.board_search_input.setPlaceholderText("Filter cards by title")
+            self.board_search_input.setFixedWidth(240)
+            self.board_search_input.setFixedHeight(30)
+            self.board_search_input.textChanged.connect(self._on_board_search_changed)
+            board_header_layout.addWidget(self.board_search_input, 0, Qt.AlignVCenter)
 
             self.columns_scroll = QScrollArea()
             self.columns_scroll.setObjectName("ColumnsScroll")

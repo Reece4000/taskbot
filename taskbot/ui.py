@@ -3,16 +3,24 @@ from __future__ import annotations
 import html
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from taskbot.config import discover_config_path, ensure_runtime_directories, load_config
+from taskbot.config import (
+    discover_config_path,
+    editable_config_path,
+    ensure_runtime_directories,
+    load_config,
+    save_config_overrides,
+)
 from taskbot.store import (
     StoredTask,
     create_board,
     create_task,
+    delete_task,
     edit_task,
     ensure_task_store,
     load_store_snapshot,
@@ -30,6 +38,12 @@ PHASE_TITLES = {
     "needs_testing": "Needs Testing",
     "blocked": "Blocked",
     "completed": "Completed",
+}
+APPROVAL_POLICIES = ["never", "on-request", "on-failure", "untrusted"]
+SANDBOX_MODES = ["workspace-write", "read-only", "danger-full-access"]
+VERIFICATION_MODES = {
+    "manual": "Manual testing only",
+    "commands": "Run configured commands",
 }
 
 ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
@@ -132,12 +146,74 @@ def _boards_from_store_snapshot(store: Dict[str, Any]) -> List[Dict[str, Any]]:
     return boards
 
 
+def _verification_commands_to_lines(config: Dict[str, Any]) -> str:
+    commands = config.get("verification", {}).get("commands", [])
+    lines: List[str] = []
+    for entry in commands:
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+        parts = [str(part) for part in entry.get("command", []) if str(part).strip()]
+        if not parts:
+            continue
+        lines.append(shlex.join(parts))
+    return "\n".join(lines)
+
+
+def _resolved_verification_mode(config: Dict[str, Any]) -> str:
+    verification = config.get("verification", {})
+    mode = str(verification.get("mode", "auto")).strip().lower()
+    if mode in VERIFICATION_MODES:
+        return mode
+    commands = verification.get("commands", [])
+    has_commands = any(isinstance(entry, dict) and entry.get("enabled", True) for entry in commands)
+    return "commands" if has_commands else "manual"
+
+
+def _command_name(parts: List[str], index: int) -> str:
+    token = Path(parts[0]).name if parts else "check"
+    slug = re.sub(r"[^a-z0-9]+", "-", token.lower()).strip("-")
+    return slug or "check-{0}".format(index)
+
+
+def _parse_verification_command_lines(raw_text: str) -> List[Dict[str, Any]]:
+    commands: List[Dict[str, Any]] = []
+    for index, raw_line in enumerate(raw_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError as exc:
+            raise ValueError("Invalid verification command on line {0}: {1}".format(index, exc)) from exc
+        if not parts:
+            continue
+        commands.append(
+            {
+                "name": _command_name(parts, index),
+                "command": parts,
+                "enabled": True,
+                "timeout_seconds": 300,
+            }
+        )
+    return commands
+
+
+def _repo_agents_path(repo_root: Path) -> Path:
+    resolved_repo = repo_root.resolve()
+    for candidate_name in ("agents.md", "AGENTS.md"):
+        candidate = resolved_repo / candidate_name
+        if candidate.exists():
+            return candidate
+    return resolved_repo / "agents.md"
+
+
 def launch_ui(config: Dict[str, Any]) -> int:
     try:
         from PySide6.QtCore import QTimer, Qt
         from PySide6.QtGui import QFont, QFontDatabase, QTextCursor
         from PySide6.QtWidgets import (
             QApplication,
+            QCheckBox,
             QComboBox,
             QDialog,
             QDialogButtonBox,
@@ -238,9 +314,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
     class AddBoardDialog(QDialog):
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__(parent)
+            self.setObjectName("AppDialog")
             self.setWindowTitle("New Board")
             self.setModal(True)
-            self.resize(420, 160)
+            self.resize(420, 200)
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(24, 24, 24, 24)
@@ -257,11 +334,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.title_input = QLineEdit()
             self.title_input.setPlaceholderText("Board title")
+            self.title_input.setMinimumHeight(36)
             layout.addWidget(self.title_input)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.setObjectName("DialogButtons")
             buttons.accepted.connect(self.accept)
             buttons.rejected.connect(self.reject)
+            layout.addSpacing(8)
             layout.addWidget(buttons)
 
         def accept(self) -> None:
@@ -280,9 +360,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
                      default_board: str,
                      parent: QWidget | None = None) -> None:
             super().__init__(parent)
+            self.setObjectName("AppDialog")
             self.setWindowTitle("Add Task")
             self.setModal(True)
-            self.resize(560, 320)
+            self.resize(560, 430)
 
             available_boards = list(board_titles)
             if default_board and default_board not in available_boards:
@@ -331,8 +412,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.addWidget(self.context_input)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.setObjectName("DialogButtons")
             buttons.accepted.connect(self.accept)
             buttons.rejected.connect(self.reject)
+            layout.addSpacing(10)
             layout.addWidget(buttons)
 
             self.title_input.setFocus()
@@ -365,9 +448,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
                      parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self.task = task
+            self.setObjectName("AppDialog")
             self.setWindowTitle("Edit Task")
             self.setModal(True)
-            self.resize(560, 380)
+            self.resize(560, 500)
 
             available_boards = list(board_titles)
             if task.board_title and task.board_title not in available_boards:
@@ -434,8 +518,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.addWidget(self.context_input)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            buttons.setObjectName("DialogButtons")
             buttons.accepted.connect(self.accept)
             buttons.rejected.connect(self.reject)
+            layout.addSpacing(10)
             layout.addWidget(buttons)
 
             self.title_input.selectAll()
@@ -468,8 +554,219 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def context_notes(self) -> str:
             return self.context_input.toPlainText().strip()
 
+    class SettingsDialog(QDialog):
+        def __init__(self, active_config: Dict[str, Any], parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.active_config = active_config
+            self.setObjectName("AppDialog")
+            self.setWindowTitle("Settings")
+            self.setModal(True)
+            self.resize(620, 760)
+
+            codex_config = active_config.get("codex", {})
+            model_config = active_config.get("models", {})
+            planning_config = active_config.get("planning", {})
+            verification_config = active_config.get("verification", {})
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(24, 24, 24, 24)
+            layout.setSpacing(14)
+
+            title = QLabel("Runner Settings")
+            title.setObjectName("DialogTitle")
+            layout.addWidget(title)
+
+            caption = QLabel(
+                "These settings are stored per repository and control Codex permissions, default models, "
+                "tiny-task planning, and verification behaviour."
+            )
+            caption.setObjectName("DialogCaption")
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
+
+            config_label = QLabel("Config File")
+            config_label.setObjectName("FieldLabel")
+            layout.addWidget(config_label)
+
+            config_value = QLabel(str(editable_config_path(active_config)))
+            config_value.setObjectName("SidebarCaption")
+            config_value.setWordWrap(True)
+            layout.addWidget(config_value)
+
+            sandbox_label = QLabel("Sandbox")
+            sandbox_label.setObjectName("FieldLabel")
+            layout.addWidget(sandbox_label)
+
+            self.sandbox_combo = QComboBox()
+            self.sandbox_combo.addItems(SANDBOX_MODES)
+            self.sandbox_combo.setCurrentText(str(codex_config.get("sandbox", "workspace-write")))
+            layout.addWidget(self.sandbox_combo)
+
+            approval_label = QLabel("Approval Policy")
+            approval_label.setObjectName("FieldLabel")
+            layout.addWidget(approval_label)
+
+            self.approval_combo = QComboBox()
+            self.approval_combo.addItems(APPROVAL_POLICIES)
+            self.approval_combo.setCurrentText(str(codex_config.get("ask_for_approval", "never")))
+            layout.addWidget(self.approval_combo)
+
+            planner_label = QLabel("Planner Model")
+            planner_label.setObjectName("FieldLabel")
+            layout.addWidget(planner_label)
+
+            self.planner_model_input = QLineEdit()
+            self.planner_model_input.setText(str(model_config.get("planner", "")))
+            self.planner_model_input.setPlaceholderText("gpt-5.4")
+            layout.addWidget(self.planner_model_input)
+
+            implementer_label = QLabel("Implementer Model")
+            implementer_label.setObjectName("FieldLabel")
+            layout.addWidget(implementer_label)
+
+            self.implementer_model_input = QLineEdit()
+            self.implementer_model_input.setText(str(model_config.get("implementer", "")))
+            self.implementer_model_input.setPlaceholderText("gpt-5.4-mini")
+            layout.addWidget(self.implementer_model_input)
+
+            self.fast_path_checkbox = QCheckBox("Skip the full planner for tiny, localised tasks")
+            self.fast_path_checkbox.setChecked(bool(planning_config.get("auto_plan_tiny_tasks", True)))
+            layout.addWidget(self.fast_path_checkbox)
+
+            verification_mode_label = QLabel("Verification Mode")
+            verification_mode_label.setObjectName("FieldLabel")
+            layout.addWidget(verification_mode_label)
+
+            self.verification_mode_combo = QComboBox()
+            for value, label_text in VERIFICATION_MODES.items():
+                self.verification_mode_combo.addItem(label_text, value)
+            mode_index = max(
+                0,
+                self.verification_mode_combo.findData(_resolved_verification_mode(active_config)),
+            )
+            self.verification_mode_combo.setCurrentIndex(mode_index)
+            layout.addWidget(self.verification_mode_combo)
+
+            verification_notes_label = QLabel("Verification Notes")
+            verification_notes_label.setObjectName("FieldLabel")
+            layout.addWidget(verification_notes_label)
+
+            self.verification_notes_input = QPlainTextEdit()
+            self.verification_notes_input.setPlaceholderText(
+                "Example: Manual QA only. Do not run automated tests in this repo."
+            )
+            self.verification_notes_input.setFixedHeight(110)
+            self.verification_notes_input.setPlainText(str(verification_config.get("instructions", "")))
+            layout.addWidget(self.verification_notes_input)
+
+            verification_commands_label = QLabel("Verification Commands")
+            verification_commands_label.setObjectName("FieldLabel")
+            layout.addWidget(verification_commands_label)
+
+            self.verification_commands_input = QPlainTextEdit()
+            self.verification_commands_input.setPlaceholderText("One shell command per line, for example:\npython3 -m unittest")
+            self.verification_commands_input.setFixedHeight(140)
+            self.verification_commands_input.setPlainText(_verification_commands_to_lines(active_config))
+            layout.addWidget(self.verification_commands_input)
+
+            commands_caption = QLabel(
+                "Commands are stored as repo-local verification hooks. In manual mode they are kept, but skipped."
+            )
+            commands_caption.setObjectName("SidebarCaption")
+            commands_caption.setWordWrap(True)
+            layout.addWidget(commands_caption)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            buttons.setObjectName("DialogButtons")
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            layout.addSpacing(8)
+            layout.addWidget(buttons)
+
+        def settings_payload(self) -> Dict[str, Any]:
+            planner_model = self.planner_model_input.text().strip()
+            implementer_model = self.implementer_model_input.text().strip()
+            verification_mode = str(self.verification_mode_combo.currentData() or "manual").strip() or "manual"
+            verification_commands = _parse_verification_command_lines(self.verification_commands_input.toPlainText())
+            return {
+                "codex": {
+                    "sandbox": self.sandbox_combo.currentText().strip(),
+                    "ask_for_approval": self.approval_combo.currentText().strip(),
+                },
+                "models": {
+                    "planner": planner_model or "gpt-5.4",
+                    "implementer": implementer_model or "gpt-5.4-mini",
+                },
+                "planning": {
+                    "auto_plan_tiny_tasks": self.fast_path_checkbox.isChecked(),
+                },
+                "verification": {
+                    "mode": verification_mode,
+                    "instructions": self.verification_notes_input.toPlainText().strip(),
+                    "commands": verification_commands,
+                },
+            }
+
+        def accept(self) -> None:
+            try:
+                self.settings_payload()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Settings", str(exc))
+                return
+            super().accept()
+
+    class AgentsFileDialog(QDialog):
+        def __init__(self, agents_path: Path, initial_text: str, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.agents_path = agents_path
+            self.setObjectName("AppDialog")
+            self.setWindowTitle("Edit agents.md")
+            self.setModal(True)
+            self.resize(760, 700)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(24, 24, 24, 24)
+            layout.setSpacing(14)
+
+            title = QLabel("Edit agents.md")
+            title.setObjectName("DialogTitle")
+            layout.addWidget(title)
+
+            caption = QLabel(
+                "Edit the repo-local agent instructions file used for this repository. "
+                "If the file does not exist yet, saving will create it."
+            )
+            caption.setObjectName("DialogCaption")
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
+
+            path_label = QLabel("File")
+            path_label.setObjectName("FieldLabel")
+            layout.addWidget(path_label)
+
+            path_value = QLabel(str(self.agents_path))
+            path_value.setObjectName("SidebarCaption")
+            path_value.setWordWrap(True)
+            layout.addWidget(path_value)
+
+            self.editor = QPlainTextEdit()
+            self.editor.setPlaceholderText("Write repo-specific agent instructions here.")
+            self.editor.setPlainText(initial_text)
+            self.editor.setMinimumHeight(420)
+            layout.addWidget(self.editor, 1)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            buttons.setObjectName("DialogButtons")
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            layout.addSpacing(8)
+            layout.addWidget(buttons)
+
+        def file_text(self) -> str:
+            return self.editor.toPlainText()
+
     class TaskCard(QFrame):
-        def __init__(self, task: StoredTask, *, show_board: bool, on_edit: Any) -> None:
+        def __init__(self, task: StoredTask, *, show_board: bool, on_edit: Any, on_delete: Any) -> None:
             super().__init__()
             self.setObjectName("TaskCard")
 
@@ -493,6 +790,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             edit_button.setObjectName("CardActionButton")
             edit_button.clicked.connect(on_edit)
             top_row.addWidget(edit_button)
+
+            delete_button = QToolButton()
+            delete_button.setText("Delete")
+            delete_button.setObjectName("CardDeleteButton")
+            delete_button.clicked.connect(on_delete)
+            top_row.addWidget(delete_button)
             layout.addLayout(top_row)
 
             title = QLabel(task.title)
@@ -558,7 +861,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.addLayout(self.body_layout)
             layout.addStretch(1)
 
-        def set_tasks(self, tasks: List[StoredTask], *, show_board: bool, on_edit_task: Any) -> None:
+        def set_tasks(self,
+                      tasks: List[StoredTask],
+                      *,
+                      show_board: bool,
+                      on_edit_task: Any,
+                      on_delete_task: Any) -> None:
             self.count_label.setText(str(len(tasks)))
             while self.body_layout.count():
                 item = self.body_layout.takeAt(0)
@@ -578,6 +886,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                         task,
                         show_board=show_board,
                         on_edit=lambda _checked=False, current_task=task: on_edit_task(current_task),
+                        on_delete=lambda _checked=False, current_task=task: on_delete_task(current_task),
                     )
                 )
 
@@ -712,6 +1021,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.runtime_label.setWordWrap(False)
             self.runtime_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             controls_row.addWidget(self.runtime_label, 1)
+
+            settings_button = QPushButton("Settings")
+            settings_button.clicked.connect(self._open_settings_dialog)
+            controls_row.addWidget(settings_button)
+
+            agents_button = QPushButton("Edit agents.md")
+            agents_button.clicked.connect(self._open_agents_dialog)
+            controls_row.addWidget(agents_button)
 
             self.plan_button = QPushButton("Plan Once")
             self.plan_button.clicked.connect(lambda: self._spawn_runner(["plan"]))
@@ -930,12 +1247,41 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 font-weight: 700;
             }
 
-            QLabel#TopFieldLabel,
-            QLabel#FieldLabel {
+            QLabel#TopFieldLabel {
                 color: #765d4f;
                 font-size: 11px;
                 font-weight: 700;
                 text-transform: uppercase;
+            }
+
+            QLabel#FieldLabel {
+                color: #c9ab97;
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+            }
+
+            QCheckBox {
+                color: #f2e8df;
+                spacing: 8px;
+                font-size: 13px;
+            }
+
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+
+            QCheckBox::indicator:unchecked {
+                background: #fffdf9;
+                border: 1px solid #d8cab9;
+                border-radius: 3px;
+            }
+
+            QCheckBox::indicator:checked {
+                background: #c8643b;
+                border: 1px solid #b65731;
+                border-radius: 3px;
             }
 
             QLineEdit,
@@ -1017,9 +1363,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QLabel#RuntimeLabel,
             QLabel#BoardSummary,
             QLabel#TerminalHint,
-            QLabel#DialogCaption,
             QLabel#SidebarCaption {
                 color: #6d594d;
+                font-size: 12px;
+            }
+
+            QLabel#DialogCaption {
+                color: #d7c8bc;
                 font-size: 12px;
             }
 
@@ -1151,6 +1501,21 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 color: #46362d;
             }
 
+            QToolButton#CardDeleteButton {
+                background: #f6e7e4;
+                color: #973f37;
+                border: 1px solid #e1c2bd;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+
+            QToolButton#CardDeleteButton:hover {
+                background: #efd6d1;
+                color: #7c2f28;
+            }
+
             QLabel#BoardBadge {
                 background: #f5ddcf;
                 color: #934e2e;
@@ -1189,11 +1554,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 padding: 12px 2px;
             }
 
-            QLabel#TerminalTitle,
-            QLabel#DialogTitle {
+            QLabel#TerminalTitle {
                 color: #1f1814;
                 font-size: 16px;
                 font-weight: 700;
+            }
+
+            QLabel#DialogTitle {
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 700;
+            }
+
+            QDialog#AppDialog {
+                background: #3b3735;
+            }
+
+            QDialog#AppDialog QDialogButtonBox#DialogButtons {
+                padding-top: 4px;
             }
 
             QTextEdit#TerminalOutput {
@@ -1455,6 +1833,46 @@ def launch_ui(config: Dict[str, Any]) -> int:
             _save_session(repo_root, self.selected_board_id)
             self.refresh_view()
 
+        def _open_settings_dialog(self) -> None:
+            dialog = SettingsDialog(self.active_config, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            try:
+                saved_path = save_config_overrides(self.active_config, dialog.settings_payload())
+                self.active_config = _runtime_config_for_repo(Path(self.active_config["repo_root"]))
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Save Settings", str(exc))
+                return
+
+            self.status_note = "Saved settings to {0}".format(saved_path)
+            self._invalidate_refresh_cache()
+            self._refresh_repo_widgets()
+            self.refresh_view()
+
+        def _open_agents_dialog(self) -> None:
+            agents_path = _repo_agents_path(Path(self.active_config["repo_root"]))
+            try:
+                initial_text = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Read agents.md", str(exc))
+                return
+
+            dialog = AgentsFileDialog(agents_path, initial_text, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+
+            try:
+                updated_text = dialog.file_text()
+                if updated_text and not updated_text.endswith("\n"):
+                    updated_text += "\n"
+                agents_path.write_text(updated_text, encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Save agents.md", str(exc))
+                return
+
+            self.status_note = "Saved {0}".format(agents_path.name)
+            self.refresh_view()
+
         def _open_add_board_dialog(self) -> None:
             dialog = AddBoardDialog(self)
             if dialog.exec() != QDialog.Accepted:
@@ -1518,6 +1936,35 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             self.selected_board_id = updated.board_id
             self.status_note = "Updated task {0}".format(updated.task_id)
+            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self.refresh_view()
+
+        def _delete_task(self, task: StoredTask) -> None:
+            if task.source_kind == "markdown":
+                detail = "This will remove the task from the task store and the markdown task file."
+            else:
+                detail = "This will remove the task from the task store."
+
+            confirmed = QMessageBox.question(
+                self,
+                "Delete Task",
+                'Delete "{0}"?\n\n{1}'.format(task.title, detail),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirmed != QMessageBox.Yes:
+                return
+
+            try:
+                deleted = delete_task(self.active_config, task.task_id)
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Delete Task", str(exc))
+                return
+            if deleted is None:
+                QMessageBox.critical(self, "Failed To Delete Task", "Task could not be found.")
+                return
+
+            self.status_note = "Deleted task {0}".format(deleted.task_id)
             _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
             self.refresh_view()
 
@@ -1657,6 +2104,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     phase_tasks,
                     show_board=show_board,
                     on_edit_task=self._open_edit_task_dialog,
+                    on_delete_task=self._delete_task,
                 )
             QTimer.singleShot(
                 0,

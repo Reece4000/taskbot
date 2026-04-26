@@ -26,6 +26,8 @@ def _format_history(history: List[Dict[str, Any]]) -> str:
 
 
 def _format_verification_commands(config: Dict[str, Any]) -> str:
+    if _verification_mode(config) == "manual":
+        return "- skipped because verification.mode is manual"
     parts = []
     for entry in config["verification"]["commands"]:
         if not entry.get("enabled", True):
@@ -33,6 +35,28 @@ def _format_verification_commands(config: Dict[str, Any]) -> str:
         command = " ".join(entry["command"])
         parts.append("- {0}: `{1}`".format(entry["name"], command))
     return "\n".join(parts) if parts else "- none configured"
+
+
+def _verification_mode(config: Dict[str, Any]) -> str:
+    verification = config.get("verification", {})
+    mode = str(verification.get("mode", "auto")).strip().lower()
+    if mode in {"manual", "commands"}:
+        return mode
+    commands = verification.get("commands", [])
+    has_commands = any(isinstance(entry, dict) and entry.get("enabled", True) for entry in commands)
+    return "commands" if has_commands else "manual"
+
+
+def _format_verification_policy(config: Dict[str, Any]) -> str:
+    instructions = str(config.get("verification", {}).get("instructions", "") or "").strip()
+    mode = _verification_mode(config)
+    if mode == "manual":
+        base = "- mode: manual\n- automated commands: disabled\n- expectation: leave concise manual follow-up steps when runtime confirmation is still needed"
+    else:
+        base = "- mode: commands\n- automated commands: outer runner will execute the configured verification hooks after implementation"
+    if instructions:
+        return "{0}\n- repo notes: {1}".format(base, instructions)
+    return base
 
 
 def _task_context_payload(task: Any) -> Dict[str, Any]:
@@ -66,6 +90,7 @@ def build_plan_prompt(repo_root: Path,
                       file_hints: List[Tuple[str, List[str], float]],
                       history: List[Dict[str, Any]]) -> str:
     subagent_text = "Allowed" if config["codex"].get("allow_subagents", True) else "Not allowed"
+    phase_text = ", ".join(str(item) for item in config.get("store", {}).get("phases", []))
     payload = {
         "repo_root": str(repo_root),
         "task_id": task.task_id,
@@ -91,11 +116,20 @@ Recent task history:
 Verification hooks available after implementation:
 {verification}
 
+Verification policy:
+{verification_policy}
+
 Constraints:
 - Preserve user-visible behaviour unless a deviation is explicitly justified.
 - Keep the plan narrow and task-specific.
 - Optimise for low token usage: inspect targeted files only.
 - Respect the repository's existing architecture and conventions.
+- If the task is obviously tiny and localised, keep the plan compact: 1-3 short steps and no filler detail.
+- Treat zero-match search probes as informational, not as blockers.
+- If the selected task is too large for one clean implementation pass, set `decomposition.should_split` to true and break it into 2-6 small modular subtasks with ready-to-run plans.
+- Each decomposed subtask must include a `board_title`. Reuse the existing board unless a new board materially improves organisation.
+- Each decomposed subtask must have its own concise context, acceptance list, workflow phase, and full plan payload.
+- Valid workflow phases for subtasks: {phases}
 - Subagent delegation: {subagents}
 
 Return JSON only matching the provided schema.
@@ -104,6 +138,8 @@ Return JSON only matching the provided schema.
         file_hints=_format_file_hints(file_hints),
         history=_format_history(history),
         verification=_format_verification_commands(config),
+        verification_policy=_format_verification_policy(config),
+        phases=phase_text or "backlog, planning, ready, in_progress, needs_testing, blocked, completed",
         subagents=subagent_text,
     )
 
@@ -148,11 +184,17 @@ Execution rules:
 - Do not edit the task markdown or task store files directly; the outer runner manages task status.
 - Inspect files surgically with `rg` and `sed -n` instead of broad scans.
 - Preserve established behaviour and interfaces unless the task itself requires a change.
+- Treat zero-match search commands as normal and move on without retry loops.
+- If verification mode is manual or no commands are configured, do not invent broad automated test runs or keep retrying failing speculative checks.
+- In manual-verification repos, prefer a safe static sanity check only when it is trivial and sandbox-safe; otherwise leave precise manual follow-up notes and mark `needs_testing`.
 - If the task cannot be confidently runtime-verified with the available hooks, prefer `needs_testing` over `completed`.
 - {subagents}
 
 Verification commands the outer runner will execute after your turn:
 {verification}
+
+Verification policy:
+{verification_policy}
 
 Return JSON only matching the provided schema.
 """.format(
@@ -166,4 +208,5 @@ Return JSON only matching the provided schema.
         plan=json.dumps(plan_payload, indent=2),
         subagents=subagent_text,
         verification=_format_verification_commands(config),
+        verification_policy=_format_verification_policy(config),
     )

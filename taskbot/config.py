@@ -78,6 +78,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "implementation_file_limit": 16,
         "max_history_items": 2,
     },
+    "planning": {
+        "auto_plan_tiny_tasks": True,
+    },
     "selection": {
         "include_needs_testing": False,
     },
@@ -92,6 +95,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "terminal_ansi": True,
     },
     "verification": {
+        "mode": "auto",
+        "instructions": "",
         "commands": [],
     },
 }
@@ -156,6 +161,31 @@ def load_config(repo_root: Path,
         config["ui"]["terminal_log"] = _resolve_path(repo_root, str(config["ui"]["terminal_log"]))
 
     return config
+
+
+def editable_config_path(config: Dict[str, Any]) -> Path:
+    configured = str(config.get("config_path", "")).strip()
+    if configured:
+        return Path(configured).resolve()
+    return (Path(config["repo_root"]).resolve() / "_taskbot" / "config.json").resolve()
+
+
+def save_config_overrides(config: Dict[str, Any], overrides: Dict[str, Any]) -> Path:
+    target_path = editable_config_path(config)
+    existing: Dict[str, Any] = {}
+    if target_path.exists():
+        with target_path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError("config file must contain a JSON object")
+        existing = loaded
+
+    merged = _merge_dict(existing, overrides)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with target_path.open("w", encoding="utf-8") as handle:
+        json.dump(merged, handle, indent=2)
+        handle.write("\n")
+    return target_path.resolve()
 
 
 def ensure_runtime_directories(config: Dict[str, Any]) -> None:

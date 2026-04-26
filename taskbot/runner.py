@@ -19,6 +19,7 @@ from taskbot.indexer import build_repo_index, rank_files_for_task
 from taskbot.prompts import build_implementation_prompt, build_plan_prompt
 from taskbot.store import (
     StoredTask,
+    apply_task_decomposition,
     apply_plan_result,
     create_task,
     ensure_task_store,
@@ -36,6 +37,47 @@ from taskbot.verification import VerificationResult, run_verification_steps
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = APP_ROOT / "schemas"
+TINY_TASK_TEXT_HINTS = (
+    "ui",
+    "tooltip",
+    "style",
+    "stylesheet",
+    "css",
+    "spacing",
+    "padding",
+    "margin",
+    "icon",
+    "hover",
+    "label",
+    "copy",
+    "text",
+    "title",
+    "dialog",
+    "modal",
+    "button",
+    "card",
+    "splitter",
+    "width",
+    "height",
+    "size",
+    "sizing",
+    "layout",
+    "color",
+)
+TINY_TASK_PATH_HINTS = ("ui", "view", "dialog", "widget", "theme", "style", "stylesheet", "css", "qml")
+TINY_TASK_NEGATIVE_HINTS = (
+    "refactor",
+    "architecture",
+    "migration",
+    "database",
+    "auth",
+    "permission system",
+    "task store",
+    "indexer",
+    "schema",
+    "subtask",
+    "subagent",
+)
 
 
 def _now_stamp() -> str:
@@ -104,6 +146,126 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _task_summary(task: StoredTask) -> str:
     return "{0} [{1}] {2}".format(task.board_title, task.phase, task.title)
+
+
+def _verification_mode(config: Dict[str, Any]) -> str:
+    verification = config.get("verification", {})
+    mode = str(verification.get("mode", "auto")).strip().lower()
+    if mode in {"manual", "commands"}:
+        return mode
+    commands = verification.get("commands", [])
+    has_commands = any(isinstance(entry, dict) and entry.get("enabled", True) for entry in commands)
+    return "commands" if has_commands else "manual"
+
+
+def _enabled_verification_commands(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    commands = config.get("verification", {}).get("commands", [])
+    return [entry for entry in commands if isinstance(entry, dict) and entry.get("enabled", True)]
+
+
+def _unique_strings(values: List[str]) -> List[str]:
+    seen = set()
+    ordered: List[str] = []
+    for value in values:
+        cleaned = str(value).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+    return ordered
+
+
+def _should_fast_path_tiny_task(task: StoredTask,
+                                file_hints: List[Any],
+                                config: Dict[str, Any]) -> bool:
+    planning_config = config.get("planning", {})
+    if not bool(planning_config.get("auto_plan_tiny_tasks", True)):
+        return False
+
+    text = "{0}\n{1}".format(task.title, task.context_notes).lower()
+    if not text.strip():
+        return False
+    if any(token in text for token in TINY_TASK_NEGATIVE_HINTS):
+        return False
+    if len(task.acceptance) > 2:
+        return False
+
+    relevant_files = _unique_strings(
+        list(task.file_targets) + [str(item[0]) for item in file_hints[:3] if isinstance(item, (list, tuple)) and item]
+    )
+    if not relevant_files or len(relevant_files) > 3:
+        return False
+
+    text_hits = sum(1 for token in TINY_TASK_TEXT_HINTS if token in text)
+    path_hits = sum(1 for path in relevant_files if any(token in path.lower() for token in TINY_TASK_PATH_HINTS))
+    if text_hits == 0 and path_hits == 0:
+        return False
+
+    if len(text) > 420 and path_hits == 0:
+        return False
+    return True
+
+
+def _build_tiny_task_plan(task: StoredTask,
+                          file_hints: List[Any],
+                          config: Dict[str, Any]) -> Dict[str, Any]:
+    relevant_files = _unique_strings(
+        list(task.file_targets) + [str(item[0]) for item in file_hints[:3] if isinstance(item, (list, tuple)) and item]
+    )
+    verification_mode = _verification_mode(config)
+    verification_lines: List[str] = []
+    if verification_mode == "manual" or not _enabled_verification_commands(config):
+        verification_lines.append(
+            "Manual verification repo: avoid speculative automated test retries and leave concise follow-up steps if runtime confirmation is still needed."
+        )
+    else:
+        for entry in _enabled_verification_commands(config):
+            command = " ".join(str(part) for part in entry.get("command", []))
+            verification_lines.append("Outer runner will execute {0}: `{1}`".format(entry.get("name", "check"), command))
+    instructions = str(config.get("verification", {}).get("instructions", "") or "").strip()
+    if instructions:
+        verification_lines.append(instructions)
+
+    file_summary = ", ".join(relevant_files[:3]) if relevant_files else "the top-ranked UI files"
+    return {
+        "summary": (
+            "This looks like a small, localised task, so taskbot can skip a separate planning pass and implement "
+            "directly against {0}."
+        ).format(file_summary),
+        "constraints": [
+            "Keep the change tightly scoped to the most relevant files.",
+            "Preserve existing behaviour outside the requested tweak.",
+            "Prefer needs_testing over completed when the configured verification policy is manual.",
+        ],
+        "relevant_files": relevant_files,
+        "steps": [
+            {
+                "title": "Inspect the most likely files only",
+                "details": "Read just the top-ranked files and confirm the exact local change needed before editing.",
+                "files": relevant_files,
+                "parallelisable": False,
+            },
+            {
+                "title": "Implement the smallest viable change",
+                "details": "Modify only the targeted code paths needed for this task and avoid broad refactors.",
+                "files": relevant_files,
+                "parallelisable": False,
+            },
+            {
+                "title": "Validate using the configured verification policy",
+                "details": "Use configured verification commands when present; otherwise leave precise manual follow-up notes instead of repeated speculative test attempts.",
+                "files": relevant_files,
+                "parallelisable": False,
+            },
+        ],
+        "verification": verification_lines,
+        "subagent_splits": [],
+        "decomposition": {
+            "should_split": False,
+            "reason": "Task qualifies for the tiny-task fast path.",
+            "subtasks": [],
+        },
+    }
 
 
 def _read_recent_history(config: Dict[str, Any], task: StoredTask) -> List[Dict[str, Any]]:
@@ -279,7 +441,11 @@ def _verification_summary(results: List[VerificationResult]) -> Dict[str, Any]:
     }
 
 
-def _run_plan_for_task(config: Dict[str, Any], task: StoredTask, *, rebuild_index: bool = False) -> Dict[str, Any]:
+def _run_plan_for_task(config: Dict[str, Any],
+                       task: StoredTask,
+                       *,
+                       rebuild_index: bool = False,
+                       allow_fast_path: bool = False) -> Dict[str, Any]:
     repo_root = Path(config["repo_root"])
     artifact_dir = _artifact_dir(config, task)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -314,6 +480,27 @@ def _run_plan_for_task(config: Dict[str, Any], task: StoredTask, *, rebuild_inde
         },
     )
 
+    if allow_fast_path and _should_fast_path_tiny_task(refreshed_task, file_hints, config):
+        plan_payload = _build_tiny_task_plan(refreshed_task, file_hints, config)
+        _write_json(artifact_dir / "plan.result.json", plan_payload)
+        planned_task = apply_plan_result(
+            config,
+            refreshed_task.task_id,
+            plan_payload=plan_payload,
+            artifact_dir=str(artifact_dir),
+        ) or refreshed_task
+        _emit_line(config, _banner(config, "planning", "{0} | tiny-task fast path".format(task.task_id)))
+        return {
+            "artifact_dir": artifact_dir,
+            "plan": plan_payload,
+            "file_hints": file_hints,
+            "history": history,
+            "task": planned_task,
+            "split": False,
+            "subtasks": [],
+            "auto_planned": True,
+        }
+
     prompt = build_plan_prompt(repo_root, config, refreshed_task, file_hints, history)
     plan_result = run_codex_exec(
         repo_root,
@@ -327,31 +514,101 @@ def _run_plan_for_task(config: Dict[str, Any], task: StoredTask, *, rebuild_inde
     _validate_phase_result("plan", plan_result)
     plan_payload = plan_result.parsed_output or {}
     _write_json(artifact_dir / "plan.result.json", plan_payload)
-    apply_plan_result(config, refreshed_task.task_id, plan_payload=plan_payload, artifact_dir=str(artifact_dir))
+    decomposition = plan_payload.get("decomposition", {})
+    should_split = bool(isinstance(decomposition, dict) and decomposition.get("should_split"))
+    if should_split:
+        split_result = apply_task_decomposition(
+            config,
+            refreshed_task.task_id,
+            plan_payload=plan_payload,
+            artifact_dir=str(artifact_dir),
+        )
+        return {
+            "artifact_dir": artifact_dir,
+            "plan": plan_payload,
+            "file_hints": file_hints,
+            "history": history,
+            "task": split_result["parent_task"],
+            "split": True,
+            "subtasks": split_result["subtasks"],
+        }
+
+    planned_task = apply_plan_result(
+        config,
+        refreshed_task.task_id,
+        plan_payload=plan_payload,
+        artifact_dir=str(artifact_dir),
+    ) or refreshed_task
     return {
         "artifact_dir": artifact_dir,
         "plan": plan_payload,
         "file_hints": file_hints,
         "history": history,
-        "task": refreshed_task,
+        "task": planned_task,
+        "split": False,
+        "subtasks": [],
+        "auto_planned": False,
     }
 
 
 def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: bool = False) -> Dict[str, Any]:
     if task.needs_planning():
-        plan_context = _run_plan_for_task(config, task, rebuild_index=rebuild_index)
-        summary = {
-            "task_id": task.task_id,
-            "status": "planned",
-            "summary": str(plan_context["plan"].get("summary", "")),
-            "mark_task_result": "ready",
-            "verification": {"all_passed": True, "results": []},
-            "artifact_dir": str(plan_context["artifact_dir"]),
-            "started_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        _append_history(config, summary)
-        _write_json(Path(plan_context["artifact_dir"]) / "run.summary.json", summary)
-        return summary
+        plan_context = _run_plan_for_task(
+            config,
+            task,
+            rebuild_index=rebuild_index,
+            allow_fast_path=True,
+        )
+        if plan_context.get("split"):
+            subtasks: List[StoredTask] = plan_context.get("subtasks", [])
+            decomposition = plan_context["plan"].get("decomposition", {})
+            summary_text = str(decomposition.get("reason", "")).strip()
+            if not summary_text:
+                summary_text = "Split into {0} planned subtasks".format(len(subtasks))
+            summary = {
+                "task_id": task.task_id,
+                "status": "split",
+                "summary": summary_text,
+                "mark_task_result": "created {0} planned subtasks".format(len(subtasks)),
+                "verification": {"all_passed": True, "results": []},
+                "artifact_dir": str(plan_context["artifact_dir"]),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "subtasks": [
+                    {
+                        "task_id": item.task_id,
+                        "board_title": item.board_title,
+                        "title": item.title,
+                        "phase": item.phase,
+                    }
+                    for item in subtasks
+                ],
+            }
+            _append_history(config, summary)
+            _write_json(Path(plan_context["artifact_dir"]) / "run.summary.json", summary)
+            _emit_line(
+                config,
+                _banner(
+                    config,
+                    "split",
+                    "{0} subtasks created from {1}".format(len(subtasks), task.task_id),
+                ),
+            )
+            return summary
+
+        task = plan_context.get("task", task)
+        if not plan_context.get("auto_planned"):
+            summary = {
+                "task_id": task.task_id,
+                "status": "planned",
+                "summary": str(plan_context["plan"].get("summary", "")),
+                "mark_task_result": "ready",
+                "verification": {"all_passed": True, "results": []},
+                "artifact_dir": str(plan_context["artifact_dir"]),
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            _append_history(config, summary)
+            _write_json(Path(plan_context["artifact_dir"]) / "run.summary.json", summary)
+            return summary
 
     repo_root = Path(config["repo_root"])
     artifact_dir = _artifact_dir(config, task)
@@ -554,10 +811,15 @@ def _cmd_plan(config: Dict[str, Any], args: argparse.Namespace) -> int:
         return 1
     _acquire_runtime_lock(config, "plan")
     try:
-        result = _run_plan_for_task(config, task, rebuild_index=args.rebuild_index)
+        result = _run_plan_for_task(config, task, rebuild_index=args.rebuild_index, allow_fast_path=True)
     finally:
         _clear_runtime(config)
-    print("planned:", task.task_id)
+    if result.get("split"):
+        print("split:", task.task_id)
+        for subtask in result.get("subtasks", []):
+            print("  -> {0} | {1} | {2}".format(subtask.task_id, subtask.board_title, subtask.title))
+    else:
+        print("planned:", task.task_id)
     print("artifact:", result["artifact_dir"])
     return 0
 

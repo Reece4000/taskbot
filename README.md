@@ -8,6 +8,7 @@ It is designed to:
 - keep prompts small by passing only the selected task plus compact repo index hints
 - update `_taskbot/_tasks.md` statuses without asking the agent to manage the task file directly
 - run repo-local verification commands after implementation
+- support repo-local execution settings for sandbox, approval policy, models, and verification mode
 - stop gracefully between iterations via a stop file instead of killing the process
 - stream agent progress into the terminal while still writing raw logs under `_taskbot/artifacts/`
 
@@ -36,10 +37,11 @@ python3 taskbot.py --repo-root /path/to/repo status
 1. Sync `_taskbot/_tasks.md` into `_taskbot/tasks.yaml`.
 2. Pick the next runnable task from the YAML store.
 3. If the task has not been scoped yet, run a planning pass and store the plan back into the task record.
-4. On the next pass, run implementation against the stored plan in a fresh Codex session.
-5. Apply any verification commands configured for the selected repo.
-6. Move the task through phases such as `backlog`, `planning`, `ready`, `in_progress`, `needs_testing`, `blocked`, and `completed`.
-7. Persist artifacts under `_taskbot/artifacts/`.
+4. Small localised tasks can skip the heavyweight planner pass and go straight into implementation with a compact auto-generated plan.
+5. Otherwise, on the next pass, run implementation against the stored plan in a fresh Codex session.
+6. Apply any verification commands configured for the selected repo, or skip them when the repo is configured for manual verification.
+7. Move the task through phases such as `backlog`, `planning`, `ready`, `in_progress`, `needs_testing`, `blocked`, and `completed`.
+8. Persist artifacts under `_taskbot/artifacts/`.
 
 ## Graceful Stop
 
@@ -66,6 +68,7 @@ Tasks added with minimal detail start in `backlog`.
 
 - First pass: taskbot runs planning, discovers relevant files and execution steps, and stores them in the YAML task record.
 - Second pass: taskbot moves the task to implementation using the stored plan.
+- If a task is too large for one clean pass, planning can decompose it into several smaller subtasks, create boards for them if needed, and store each subtask with its own ready plan.
 
 That gives you lightweight task entry without throwing away structure.
 
@@ -90,6 +93,7 @@ The desktop UI provides:
 - centered workflow columns in the middle
 - a compact add-task button that opens a modal
 - runner controls for planning and execution
+- a settings dialog for sandbox/approval policy, default models, tiny-task fast path, and verification policy
 - a bottom terminal pane backed by `_taskbot/control/terminal.log`
 
 When you load a repository, task state, artifacts, and logs are written under that repository's `_taskbot/` directory.
@@ -106,7 +110,11 @@ Taskbot reduces prompt size by:
 
 ## Verification
 
-Verification is opt-in. Configure repo-local commands in either `taskbot.config.json` or `<repo>/_taskbot/config.json`.
+Verification is repo-local. Configure it in either `taskbot.config.json` or `<repo>/_taskbot/config.json`.
+
+- `verification.mode = "manual"` skips automated checks and tells the agent to leave concise manual follow-up notes instead of repeatedly retrying speculative tests.
+- `verification.mode = "commands"` runs the configured command list after implementation.
+- `verification.instructions` lets you store repo-specific testing guidance for the agent.
 
 Terminal color output is controlled by `codex.stream_ansi` in taskbot config:
 

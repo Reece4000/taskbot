@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from taskbot.tasks import TaskItem, parse_tasks, update_task_status
+from taskbot.tasks import TaskItem, delete_task as delete_markdown_task, parse_tasks, update_task_status
 
 
 STORE_VERSION = 1
@@ -500,6 +500,105 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
     return created
 
 
+def apply_task_decomposition(config: Dict[str, Any],
+                             parent_task_id: str,
+                             *,
+                             plan_payload: Dict[str, Any],
+                             artifact_dir: str) -> Dict[str, Any]:
+    created_tasks: List[StoredTask] = []
+    parent_task: Optional[StoredTask] = None
+
+    decomposition = plan_payload.get("decomposition", {})
+    raw_subtasks = decomposition.get("subtasks", []) if isinstance(decomposition, dict) else []
+    if not isinstance(raw_subtasks, list) or not raw_subtasks:
+        raise ValueError("decomposition must include at least one subtask")
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal parent_task
+        existing_ids = {
+            str(payload.get("task_id", ""))
+            for payload in store.get("tasks", [])
+            if isinstance(payload, dict)
+        }
+        next_order = max((int(payload.get("order", 0) or 0) for payload in store.get("tasks", [])), default=-1) + 1
+
+        for raw_subtask in raw_subtasks:
+            if not isinstance(raw_subtask, dict):
+                continue
+            board_title = str(raw_subtask.get("board_title", "")).strip() or str(
+                config.get("store", {}).get("default_board", "General")
+            )
+            title = str(raw_subtask.get("title", "")).strip()
+            if not title:
+                continue
+            phase = str(raw_subtask.get("phase", "ready")).strip() or "ready"
+            board_id = _ensure_board(store, board_title, len(store.get("boards", [])))
+            candidate_id = _stable_task_id(board_title, title)
+            counter = 1
+            while candidate_id in existing_ids:
+                candidate_id = "{0}-{1}".format(_stable_task_id(board_title, title), counter)
+                counter += 1
+            existing_ids.add(candidate_id)
+
+            plan = raw_subtask.get("plan", {})
+            payload = StoredTask(
+                task_id=candidate_id,
+                board_id=board_id,
+                board_title=board_title,
+                title=title,
+                phase=phase,
+                context_notes=str(raw_subtask.get("context_notes", "")).strip(),
+                file_targets=[str(item).strip() for item in plan.get("relevant_files", []) if str(item).strip()],
+                acceptance=[str(item).strip() for item in raw_subtask.get("acceptance", []) if str(item).strip()],
+                source_kind="ui",
+                source_line_index=-1,
+                plan_status="ready",
+                plan=dict(plan) if isinstance(plan, dict) else {},
+                artifact_dir=artifact_dir,
+                last_result_status="planned",
+                last_summary=str(plan.get("summary", "")) if isinstance(plan, dict) else "",
+                last_error="",
+                order=next_order,
+                created_at=_now_iso(),
+                updated_at=_now_iso(),
+            ).to_payload()
+            store["tasks"].append(payload)
+            created_tasks.append(StoredTask.from_payload(payload))
+            next_order += 1
+
+        split_summary = str(decomposition.get("reason", "")).strip()
+        if not split_summary:
+            split_summary = "Split into {0} planned subtasks".format(len(created_tasks))
+
+        for payload in store.get("tasks", []):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("task_id", "")) != parent_task_id:
+                continue
+            payload["phase"] = "completed"
+            payload["plan_status"] = "ready"
+            payload["plan"] = dict(plan_payload)
+            payload["artifact_dir"] = artifact_dir
+            payload["last_result_status"] = "split"
+            payload["last_summary"] = split_summary
+            payload["last_error"] = ""
+            payload["updated_at"] = _now_iso()
+            parent_task = StoredTask.from_payload(payload)
+            break
+
+    _mutate_store(config, mutate, sync_markdown=True)
+
+    if parent_task is None:
+        raise RuntimeError("failed to update parent task during decomposition")
+    if parent_task.source_kind == "markdown":
+        update_task_status(Path(config["task_file"]), parent_task_id, "completed")
+
+    return {
+        "parent_task": parent_task,
+        "subtasks": created_tasks,
+    }
+
+
 def edit_task(config: Dict[str, Any],
               task_id: str,
               *,
@@ -540,6 +639,29 @@ def edit_task(config: Dict[str, Any],
     if updated and updated.source_kind == "markdown" and phase in ("completed", "needs_testing"):
         update_task_status(Path(config["task_file"]), task_id, "completed" if phase == "completed" else "needs_testing")
     return updated
+
+
+def delete_task(config: Dict[str, Any], task_id: str) -> Optional[StoredTask]:
+    deleted: Optional[StoredTask] = None
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal deleted
+        remaining_tasks: List[Dict[str, Any]] = []
+        for payload in store.get("tasks", []):
+            if not isinstance(payload, dict):
+                remaining_tasks.append(payload)
+                continue
+            if str(payload.get("task_id", "")) == task_id:
+                deleted = StoredTask.from_payload(payload)
+                continue
+            remaining_tasks.append(payload)
+        store["tasks"] = remaining_tasks
+
+    _mutate_store(config, mutate, sync_markdown=True)
+
+    if deleted and deleted.source_kind == "markdown":
+        delete_markdown_task(Path(config["task_file"]), task_id)
+    return deleted
 
 
 def update_task_fields(config: Dict[str, Any], task_id: str, **fields: Any) -> Optional[StoredTask]:

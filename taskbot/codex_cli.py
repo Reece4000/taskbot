@@ -251,10 +251,19 @@ def run_codex_exec(repo_root: Path,
 
     stdout_lines: List[str] = []
     stderr_lines: List[str] = []
+    cache_root = Path(config["state_dir"]) / "tool-cache"
+    pycache_root = cache_root / "pycache"
+    xdg_cache_root = cache_root / "xdg"
+    pycache_root.mkdir(parents=True, exist_ok=True)
+    xdg_cache_root.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.setdefault("PYTHONPYCACHEPREFIX", str(pycache_root))
+    env.setdefault("XDG_CACHE_HOME", str(xdg_cache_root))
 
     process = subprocess.Popen(
         command,
         cwd=repo_root,
+        env=env,
         stdin=subprocess.PIPE,
         text=True,
         stdout=subprocess.PIPE,

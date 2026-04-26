@@ -23,6 +23,19 @@ class VerificationResult:
 def run_verification_steps(repo_root: Path, config: Dict[str, Any], artifact_dir: Path) -> List[VerificationResult]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     results: List[VerificationResult] = []
+    verification_config = config.get("verification", {})
+    mode = str(verification_config.get("mode", "auto")).strip().lower()
+    if mode not in {"manual", "commands"}:
+        commands = verification_config.get("commands", [])
+        has_commands = any(isinstance(entry, dict) and entry.get("enabled", True) for entry in commands)
+        mode = "commands" if has_commands else "manual"
+
+    if mode == "manual":
+        append_terminal_log(config, "[verify] skipped: manual verification configured")
+        summary_path = artifact_dir / "verification.summary.json"
+        with summary_path.open("w", encoding="utf-8") as handle:
+            json.dump([], handle, indent=2)
+        return results
 
     for entry in config["verification"]["commands"]:
         if not entry.get("enabled", True):

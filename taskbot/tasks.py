@@ -141,3 +141,15 @@ def update_task_status(task_file: Path, task_id: str, new_status: str) -> bool:
     lines[target.line_index] = "{0}[{1}] {2}{3}".format(prefix, canonical, text, newline)
     task_file.write_text("".join(lines), encoding="utf-8")
     return True
+
+
+def delete_task(task_file: Path, task_id: str) -> bool:
+    lines = task_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    tasks = parse_tasks(task_file)
+    target = next((task for task in tasks if task.task_id == task_id), None)
+    if target is None:
+        return False
+
+    del lines[target.line_index]
+    task_file.write_text("".join(lines), encoding="utf-8")
+    return True

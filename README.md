@@ -9,7 +9,7 @@ It is designed to:
 - update `_taskbot/_tasks.md` statuses without asking the agent to manage the task file directly
 - run repo-local verification commands after implementation
 - optionally commit and push successful implementation changes to the active branch
-- support repo-local execution settings for sandbox, approval policy, models, and verification mode
+- support repo-local execution settings for sandbox, approval policy, models, reasoning effort, and verification mode
 - stop gracefully between iterations via a stop file instead of killing the process
 - stream agent progress into the terminal while still writing raw logs under `_taskbot/artifacts/`
 
@@ -42,7 +42,7 @@ python3 taskbot.py --repo-root /path/to/repo status
 5. Otherwise, on the next pass, run implementation against the stored plan in a fresh Codex session.
 6. Apply any verification commands configured for the selected repo, or skip them when the repo is configured for manual verification.
 7. If git publishing is enabled, taskbot can create a commit and push the active branch after a successful implementation pass.
-8. Move the task through phases such as `backlog`, `planning`, `ready`, `in_progress`, `needs_testing`, `blocked`, and `completed`.
+8. Move the task through phases such as `backlog`, `planning`, `ready`, `in_progress`, `needs_testing`, `blocked`, and `completed` with the drag-and-drop board UI.
 9. Persist artifacts under `_taskbot/artifacts/`.
 
 ## Graceful Stop
@@ -60,7 +60,7 @@ Taskbot now uses `_taskbot/tasks.yaml` as its internal task store.
 - The file is written as JSON-compatible YAML, which keeps the dependency surface small.
 - Writes are atomic and guarded by a file lock.
 - `_taskbot/_tasks.md` is still imported for legacy tasks.
-- Markdown-origin tasks sync `completed` and `needs testing` back to `_taskbot/_tasks.md`.
+- Markdown-origin tasks sync `completed` and `needs testing` back to `_taskbot/_tasks.md`. Dragging one back to backlog clears the status marker in the markdown source.
 
 This is what allows the CLI loop and a future long-running UI to update tasks safely without save conflicts.
 
@@ -92,10 +92,11 @@ The desktop UI provides:
 
 - a repository selector across the top
 - a left-side board list with quick board creation
-- centered workflow columns in the middle
+- centered workflow columns in the middle, with drag-and-drop cards that can move back to backlog or forward into later stages
 - a compact add-task button that opens a non-blocking dialog
+- click-to-edit task cards for changing the board, phase, title, and context notes
 - runner controls for planning and execution, including a Start Loop dialog for indefinite or fixed-length runs
-- a settings dialog for sandbox/approval policy, default models, tiny-task fast path, verification policy, and git publishing
+- a settings dialog for sandbox/approval policy, default models, reasoning effort, tiny-task fast path, verification policy, and git publishing
 - a bottom terminal pane backed by `_taskbot/control/terminal.log`
 
 When you load a repository, task state, artifacts, and logs are written under that repository's `_taskbot/` directory.
@@ -117,6 +118,7 @@ Verification is repo-local. Configure it in either `taskbot.config.json` or `<re
 - `verification.mode = "manual"` skips automated checks and tells the agent to leave concise manual follow-up notes instead of repeatedly retrying speculative tests.
 - `verification.mode = "commands"` runs the configured command list after implementation.
 - `verification.instructions` lets you store repo-specific testing guidance for the agent.
+- `models.planner_reasoning_effort` and `models.implementer_reasoning_effort` accept `low`, `medium`, `high`, `xhigh`, or a blank value to inherit Codex's current reasoning behavior.
 
 Terminal color output is controlled by `codex.stream_ansi` in taskbot config:
 

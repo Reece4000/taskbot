@@ -32,7 +32,7 @@ from taskbot.store import (
     sync_markdown_into_store,
     update_task_phase,
 )
-from taskbot.terminal_stream import append_terminal_log, terminal_log_path
+from taskbot.terminal_stream import append_terminal_log, format_terminal_header, terminal_log_path
 from taskbot.verification import VerificationResult, run_verification_steps
 
 
@@ -78,6 +78,17 @@ TINY_TASK_NEGATIVE_HINTS = (
     "schema",
     "subtask",
     "subagent",
+)
+TINY_TASK_PLANNING_INTENT_PATTERNS = (
+    re.compile(r"\btoo large\b"),
+    re.compile(r"\blarge task\b"),
+    re.compile(r"\bbig task\b"),
+    re.compile(r"\bmulti[- ]step\b"),
+    re.compile(r"\bdecompose(?:d|s|ing)?\b"),
+    re.compile(r"\bdecomposition\b"),
+    re.compile(r"\bneeds splitting\b"),
+    re.compile(r"\bsplit(?:ting)?\s+into\s+(?:separate\s+|smaller\s+)?(?:sub)?tasks?\b"),
+    re.compile(r"\bbreak(?:ing)?\s+into\s+(?:separate\s+|smaller\s+)?(?:sub)?tasks?\b"),
 )
 
 
@@ -134,6 +145,10 @@ def _emit_line(config: Dict[str, Any], text: str, *, stderr: bool = False) -> No
         print(printable, flush=True)
 
 
+def _emit_header(config: Dict[str, Any], title: str, details: List[str]) -> None:
+    _emit_line(config, format_terminal_header(title, details))
+
+
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -176,6 +191,37 @@ def _unique_strings(values: List[str]) -> List[str]:
     return ordered
 
 
+def _tiny_task_relevant_files(task: StoredTask,
+                              file_hints: List[Any],
+                              *,
+                              limit: Optional[int] = None) -> List[str]:
+    relevant_files = _unique_strings(
+        list(task.file_targets) + [
+            str(item[0])
+            for item in file_hints
+            if isinstance(item, (list, tuple)) and item
+        ]
+    )
+    if limit is None:
+        return relevant_files
+    return relevant_files[:limit]
+
+
+def _contains_tiny_task_planning_intent(text: str) -> bool:
+    return any(pattern.search(text) for pattern in TINY_TASK_PLANNING_INTENT_PATTERNS)
+
+
+def _configured_reasoning_effort(config: Dict[str, Any], role: str) -> Optional[str]:
+    models = config.get("models", {})
+    if not isinstance(models, dict):
+        return None
+    configured_value = models.get("{0}_reasoning_effort".format(role))
+    if configured_value is None:
+        return None
+    cleaned = str(configured_value).strip()
+    return cleaned or None
+
+
 def _should_fast_path_tiny_task(task: StoredTask,
                                 file_hints: List[Any],
                                 config: Dict[str, Any]) -> bool:
@@ -186,14 +232,14 @@ def _should_fast_path_tiny_task(task: StoredTask,
     text = "{0}\n{1}".format(task.title, task.context_notes).lower()
     if not text.strip():
         return False
+    if _contains_tiny_task_planning_intent(text):
+        return False
     if any(token in text for token in TINY_TASK_NEGATIVE_HINTS):
         return False
     if len(task.acceptance) > 2:
         return False
 
-    relevant_files = _unique_strings(
-        list(task.file_targets) + [str(item[0]) for item in file_hints[:3] if isinstance(item, (list, tuple)) and item]
-    )
+    relevant_files = _tiny_task_relevant_files(task, file_hints)
     if not relevant_files or len(relevant_files) > 3:
         return False
 
@@ -210,9 +256,7 @@ def _should_fast_path_tiny_task(task: StoredTask,
 def _build_tiny_task_plan(task: StoredTask,
                           file_hints: List[Any],
                           config: Dict[str, Any]) -> Dict[str, Any]:
-    relevant_files = _unique_strings(
-        list(task.file_targets) + [str(item[0]) for item in file_hints[:3] if isinstance(item, (list, tuple)) and item]
-    )
+    relevant_files = _tiny_task_relevant_files(task, file_hints, limit=3)
     verification_mode = _verification_mode(config)
     verification_lines: List[str] = []
     if verification_mode == "manual" or not _enabled_verification_commands(config):
@@ -347,6 +391,25 @@ def _update_runtime(config: Dict[str, Any], payload: Dict[str, Any]) -> None:
     _write_json(runtime_path, existing)
 
 
+def _clear_runtime_field(config: Dict[str, Any], field_name: str) -> None:
+    runtime_path = _runtime_path(config)
+    if not runtime_path.exists():
+        return
+
+    try:
+        existing = _load_json(runtime_path)
+    except Exception:
+        return
+    if not isinstance(existing, dict) or field_name not in existing:
+        return
+
+    existing.pop(field_name, None)
+    if existing:
+        _write_json(runtime_path, existing)
+    else:
+        runtime_path.unlink()
+
+
 def _clear_runtime(config: Dict[str, Any]) -> None:
     runtime_path = _runtime_path(config)
     if runtime_path.exists():
@@ -435,6 +498,50 @@ def _validate_phase_result(phase: str, result: CodexRunResult) -> None:
         raise RuntimeError("codex {0} phase did not emit valid JSON".format(phase))
 
 
+def _run_codex_phase(config: Dict[str, Any],
+                     repo_root: Path,
+                     *,
+                     model: str,
+                     reasoning_effort: Optional[str],
+                     prompt: str,
+                     artifact_dir: Path,
+                     phase_name: str,
+                     output_schema: Optional[Path],
+                     interrupt_state: Optional[Dict[str, bool]] = None) -> CodexRunResult:
+    def on_process_started(process: subprocess.Popen[Any], command: List[str]) -> None:
+        _update_runtime(
+            config,
+            {
+                "active_session": {
+                    "phase": phase_name,
+                    "pid": process.pid,
+                    "command": list(command),
+                    "started_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            },
+        )
+
+    def on_process_finished() -> None:
+        _clear_runtime_field(config, "active_session")
+
+    def should_terminate() -> bool:
+        return bool(interrupt_state and interrupt_state.get("requested"))
+
+    return run_codex_exec(
+        repo_root,
+        config,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        prompt=prompt,
+        artifact_dir=artifact_dir,
+        phase_name=phase_name,
+        output_schema=output_schema,
+        on_process_started=on_process_started,
+        on_process_finished=on_process_finished,
+        should_terminate=should_terminate,
+    )
+
+
 def _verification_summary(results: List[VerificationResult]) -> Dict[str, Any]:
     return {
         "all_passed": all(result.exit_code == 0 for result in results),
@@ -461,10 +568,12 @@ def _run_plan_for_task(config: Dict[str, Any],
                        task: StoredTask,
                        *,
                        rebuild_index: bool = False,
-                       allow_fast_path: bool = False) -> Dict[str, Any]:
+                       allow_fast_path: bool = False,
+                       interrupt_state: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
     repo_root = Path(config["repo_root"])
     artifact_dir = _artifact_dir(config, task)
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    planner_model = str(config["models"]["planner"])
     refreshed_task = update_task_phase(
         config,
         task.task_id,
@@ -474,9 +583,14 @@ def _run_plan_for_task(config: Dict[str, Any],
         last_summary=task.last_summary,
         last_error="",
     ) or task
-
-    message = _banner(config, "planning", "{0} | {1}".format(task.task_id, task.title))
-    _emit_line(config, message)
+    _emit_header(
+        config,
+        "planning",
+        [
+            "task_id={0}".format(task.task_id),
+            "model={0}".format(planner_model),
+        ],
+    )
     index = build_repo_index(repo_root, config, rebuild=rebuild_index)
     file_hints = rank_files_for_task(
         index,
@@ -518,14 +632,16 @@ def _run_plan_for_task(config: Dict[str, Any],
         }
 
     prompt = build_plan_prompt(repo_root, config, refreshed_task, file_hints, history)
-    plan_result = run_codex_exec(
-        repo_root,
+    plan_result = _run_codex_phase(
         config,
-        model=str(config["models"]["planner"]),
+        repo_root,
+        model=planner_model,
+        reasoning_effort=_configured_reasoning_effort(config, "planner"),
         prompt=prompt,
         artifact_dir=artifact_dir,
         phase_name="plan",
         output_schema=SCHEMA_ROOT / "plan.schema.json",
+        interrupt_state=interrupt_state,
     )
     _validate_phase_result("plan", plan_result)
     plan_payload = plan_result.parsed_output or {}
@@ -567,13 +683,31 @@ def _run_plan_for_task(config: Dict[str, Any],
     }
 
 
-def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: bool = False) -> Dict[str, Any]:
-    if task.needs_planning():
+def _run_task_once(config: Dict[str, Any],
+                   task: StoredTask,
+                   *,
+                   rebuild_index: bool = False,
+                   interrupt_state: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+    needs_planning = task.needs_planning()
+    planner_model = str(config["models"]["planner"])
+    implementer_model = str(config["models"]["implementer"])
+    task_start_model = planner_model if needs_planning else implementer_model
+    _emit_header(
+        config,
+        "task start",
+        [
+            "task_id={0}".format(task.task_id),
+            "title={0}".format(task.title),
+            "model={0}".format(task_start_model),
+        ],
+    )
+    if needs_planning:
         plan_context = _run_plan_for_task(
             config,
             task,
             rebuild_index=rebuild_index,
             allow_fast_path=True,
+            interrupt_state=interrupt_state,
         )
         if plan_context.get("split"):
             subtasks: List[StoredTask] = plan_context.get("subtasks", [])
@@ -666,16 +800,25 @@ def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: b
             "artifact_dir": str(artifact_dir),
         },
     )
-    _emit_line(config, _banner(config, "implementing", active_task.task_id))
-    implementation_prompt = build_implementation_prompt(repo_root, config, active_task, file_hints, history, dict(active_task.plan))
-    implementation_result = run_codex_exec(
-        repo_root,
+    _emit_header(
         config,
-        model=str(config["models"]["implementer"]),
+        "implementing",
+        [
+            "task_id={0}".format(active_task.task_id),
+            "model={0}".format(implementer_model),
+        ],
+    )
+    implementation_prompt = build_implementation_prompt(repo_root, config, active_task, file_hints, history, dict(active_task.plan))
+    implementation_result = _run_codex_phase(
+        config,
+        repo_root,
+        model=implementer_model,
+        reasoning_effort=_configured_reasoning_effort(config, "implementer"),
         prompt=implementation_prompt,
         artifact_dir=artifact_dir,
         phase_name="implement",
         output_schema=SCHEMA_ROOT / "report.schema.json",
+        interrupt_state=interrupt_state,
     )
     _validate_phase_result("implement", implementation_result)
     report = implementation_result.parsed_output or {}
@@ -689,6 +832,36 @@ def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: b
             "report": report,
         }
 
+    report_status = str(report.get("status", "unknown")).strip() or "unknown"
+    requested_mark = str(report.get("mark_task_as", "leave_unchanged")).strip() or "leave_unchanged"
+    git_result_payload: Dict[str, Any]
+    if report_status in ("completed", "needs_testing"):
+        publish_phase = requested_mark if requested_mark in ("completed", "needs_testing") else report_status
+        git_result = publish_git_changes(
+            repo_root,
+            config,
+            artifact_dir,
+            active_task,
+            report,
+            publish_phase,
+            git_session,
+        )
+        git_result_payload = git_result.to_payload()
+    else:
+        git_result_payload = {
+            "status": "not_run",
+            "reason": "git integration runs only after a successful implementation pass",
+            "branch": "",
+            "remote": "",
+            "commit_message": "",
+            "commit_sha": "",
+            "changed_files": [],
+            "dirty_at_start": False,
+            "commit_created": False,
+            "push_attempted": False,
+            "push_succeeded": False,
+        }
+
     _update_runtime(
         config,
         {
@@ -698,17 +871,23 @@ def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: b
             "artifact_dir": str(artifact_dir),
         },
     )
-    _emit_line(config, _banner(config, "verifying", active_task.task_id))
+    _emit_header(
+        config,
+        "verifying",
+        [
+            "task_id={0}".format(active_task.task_id),
+            "model=none",
+        ],
+    )
     verification_results = run_verification_steps(repo_root, config, artifact_dir / "verification")
     verification = _verification_summary(verification_results)
     _write_json(artifact_dir / "verification.result.json", verification)
 
-    requested_mark = str(report.get("mark_task_as", "leave_unchanged"))
     if verification["all_passed"]:
         if requested_mark in ("completed", "needs_testing"):
             final_phase = requested_mark
             mark_task_result = requested_mark
-        elif str(report.get("status", "")) == "blocked":
+        elif report_status == "blocked":
             final_phase = "blocked"
             mark_task_result = "blocked"
         else:
@@ -723,43 +902,16 @@ def _run_task_once(config: Dict[str, Any], task: StoredTask, *, rebuild_index: b
         active_task.task_id,
         final_phase,
         artifact_dir=str(artifact_dir),
-        last_result_status=str(report.get("status", "unknown")),
+        last_result_status=report_status,
         last_summary=str(report.get("summary", "")),
         last_error="" if verification["all_passed"] else "verification failed",
     )
-
-    git_result_payload: Dict[str, Any]
-    if verification["all_passed"] and final_phase != "blocked":
-        git_result = publish_git_changes(
-            repo_root,
-            config,
-            artifact_dir,
-            active_task,
-            report,
-            final_phase,
-            git_session,
-        )
-        git_result_payload = git_result.to_payload()
-    else:
-        git_result_payload = {
-            "status": "not_run",
-            "reason": "git integration runs only after a successful implementation and verification pass",
-            "branch": "",
-            "remote": "",
-            "commit_message": "",
-            "commit_sha": "",
-            "changed_files": [],
-            "dirty_at_start": False,
-            "commit_created": False,
-            "push_attempted": False,
-            "push_succeeded": False,
-        }
     _write_json(artifact_dir / "git.result.json", git_result_payload)
     _log_git_result(config, git_result_payload)
 
     summary = {
         "task_id": active_task.task_id,
-        "status": str(report.get("status", "unknown")),
+        "status": report_status,
         "summary": str(report.get("summary", "")),
         "mark_task_result": mark_task_result,
         "verification": verification,
@@ -857,9 +1009,39 @@ def _cmd_plan(config: Dict[str, Any], args: argparse.Namespace) -> int:
         print("no matching task found", file=sys.stderr)
         return 1
     _acquire_runtime_lock(config, "plan")
+    interrupt_state = {"requested": False}
+
+    def handle_signal(signum: int, _frame: Any) -> None:
+        interrupt_state["requested"] = True
+        _update_runtime(config, {"phase": "signal", "signal": signum})
+
+    previous_sigint = signal.signal(signal.SIGINT, handle_signal)
+    previous_sigterm = signal.signal(signal.SIGTERM, handle_signal)
     try:
-        result = _run_plan_for_task(config, task, rebuild_index=args.rebuild_index, allow_fast_path=True)
+        _emit_header(
+            config,
+            "task start",
+            [
+                "task_id={0}".format(task.task_id),
+                "title={0}".format(task.title),
+                "model={0}".format(str(config["models"]["planner"])),
+            ],
+        )
+        result = _run_plan_for_task(
+            config,
+            task,
+            rebuild_index=args.rebuild_index,
+            allow_fast_path=True,
+            interrupt_state=interrupt_state,
+        )
+    except Exception:
+        if interrupt_state["requested"]:
+            _emit_line(config, "planning interrupted", stderr=True)
+            return 130
+        raise
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
         _clear_runtime(config)
     if result.get("split"):
         print("split:", task.task_id)
@@ -915,12 +1097,14 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
     _acquire_runtime_lock(config, "run")
     _clear_stop(config)
     stop_flag = {"requested": False}
+    interrupt_state = {"requested": False}
     include_needs_testing = bool(
         args.include_needs_testing or config.get("selection", {}).get("include_needs_testing", False)
     )
 
     def handle_signal(signum: int, _frame: Any) -> None:
         stop_flag["requested"] = True
+        interrupt_state["requested"] = True
         _request_stop(config)
         _update_runtime(config, {"phase": "signal", "signal": signum})
 
@@ -946,8 +1130,16 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
                 break
 
             try:
-                summary = _run_task_once(config, task, rebuild_index=args.rebuild_index)
+                summary = _run_task_once(
+                    config,
+                    task,
+                    rebuild_index=args.rebuild_index,
+                    interrupt_state=interrupt_state,
+                )
             except Exception as exc:
+                if interrupt_state["requested"]:
+                    _emit_line(config, "task {0} interrupted".format(task.task_id), stderr=True)
+                    break
                 update_task_phase(
                     config,
                     task.task_id,
@@ -975,7 +1167,7 @@ def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
         _clear_runtime(config)
-    return 0
+    return 130 if interrupt_state["requested"] else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

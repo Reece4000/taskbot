@@ -61,6 +61,14 @@ def _phase_from_markdown_status(status: str) -> str:
     return "backlog"
 
 
+def _markdown_status_for_phase(phase: str) -> str:
+    if phase == "completed":
+        return "completed"
+    if phase == "needs_testing":
+        return "needs_testing"
+    return "pending"
+
+
 @dataclass
 class StoredTask:
     task_id: str
@@ -591,7 +599,11 @@ def apply_task_decomposition(config: Dict[str, Any],
     if parent_task is None:
         raise RuntimeError("failed to update parent task during decomposition")
     if parent_task.source_kind == "markdown":
-        update_task_status(Path(config["task_file"]), parent_task_id, "completed")
+        update_task_status(
+            Path(config["task_file"]),
+            parent_task_id,
+            _markdown_status_for_phase(parent_task.phase),
+        )
 
     return {
         "parent_task": parent_task,
@@ -636,8 +648,12 @@ def edit_task(config: Dict[str, Any],
 
     _mutate_store(config, mutate, sync_markdown=True)
 
-    if updated and updated.source_kind == "markdown" and phase in ("completed", "needs_testing"):
-        update_task_status(Path(config["task_file"]), task_id, "completed" if phase == "completed" else "needs_testing")
+    if updated and updated.source_kind == "markdown":
+        update_task_status(
+            Path(config["task_file"]),
+            task_id,
+            _markdown_status_for_phase(updated.phase),
+        )
     return updated
 
 
@@ -720,8 +736,12 @@ def update_task_phase(config: Dict[str, Any],
     if last_error is not None:
         fields["last_error"] = last_error
     updated = update_task_fields(config, task_id, **fields)
-    if updated and updated.source_kind == "markdown" and phase in ("completed", "needs_testing"):
-        update_task_status(Path(config["task_file"]), task_id, "completed" if phase == "completed" else "needs_testing")
+    if updated and updated.source_kind == "markdown":
+        update_task_status(
+            Path(config["task_file"]),
+            task_id,
+            _markdown_status_for_phase(updated.phase),
+        )
     return updated
 
 

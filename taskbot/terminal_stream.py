@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 def terminal_log_path(config: dict[str, Any]) -> Path:
@@ -19,3 +19,11 @@ def append_terminal_log(config: dict[str, Any], text: str) -> None:
         for line in text.splitlines():
             handle.write(line + "\n")
 
+
+def format_terminal_header(title: str, details: Iterable[str] = ()) -> str:
+    lines = ["", "[taskbot] === {0} ===".format(str(title).strip())]
+    for detail in details:
+        cleaned = str(detail).strip()
+        if cleaned:
+            lines.append("[taskbot] {0}".format(cleaned))
+    return "\n".join(lines)

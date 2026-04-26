@@ -5,23 +5,28 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from taskbot.codex_cli import CodexRunResult
 from taskbot.config import DEFAULT_CONFIG, load_config, save_config_overrides
 from taskbot.git_integration import capture_git_session_state, publish_git_changes
-from taskbot.runner import _build_tiny_task_plan, _should_fast_path_tiny_task
-from taskbot.store import StoredTask
+from taskbot.runner import _build_tiny_task_plan, _run_task_once, _should_fast_path_tiny_task
+from taskbot.store import StoredTask, create_task, update_task_fields
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
     _command_enter_shortcut_sequences,
+    _command_enter_dialog_candidate,
+    _command_enter_preferred_button,
     _install_command_enter_shortcuts,
     _checkbox_indicator_tick_icon_path,
+    _trash_icon_path,
     RUNNER_CONTROL_TOOLTIPS,
     _config_path_label_for_header,
     _repo_agents_path,
     _start_loop_run_args,
     _terminal_text_should_refresh,
 )
-from taskbot.verification import run_verification_steps
+from taskbot.verification import VerificationResult, run_verification_steps
 
 
 class TaskbotBehaviourTests(unittest.TestCase):
@@ -55,8 +60,9 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self._run_git(repo_root, "config", "user.name", "Taskbot Tests")
         self._run_git(repo_root, "config", "user.email", "taskbot@example.com")
 
+        (repo_root / ".gitignore").write_text("_taskbot/\n", encoding="utf-8")
         (repo_root / "app.txt").write_text("base\n", encoding="utf-8")
-        self._run_git(repo_root, "add", "app.txt")
+        self._run_git(repo_root, "add", ".gitignore", "app.txt")
         self._run_git(repo_root, "commit", "-m", "initial")
 
         init_remote = subprocess.run(
@@ -245,10 +251,86 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertEqual([shortcut.context for shortcut in shortcuts], ["window-shortcut", "window-shortcut"])
         self.assertTrue(all(shortcut.activated.connected is callback for shortcut in shortcuts))
 
+    def test_command_enter_preferred_button_prefers_ok_label_over_default(self) -> None:
+        class FakeButton:
+            def __init__(self, text: str, enabled: bool = True, default: bool = False) -> None:
+                self._text = text
+                self._enabled = enabled
+                self._default = default
+
+            def text(self) -> str:
+                return self._text
+
+            def isEnabled(self) -> bool:
+                return self._enabled
+
+            def isDefault(self) -> bool:
+                return self._default
+
+        default_button = FakeButton("Cancel", default=True)
+        ok_button = FakeButton("&OK")
+
+        self.assertIs(
+            _command_enter_preferred_button([default_button, ok_button]),
+            ok_button,
+        )
+
+    def test_command_enter_preferred_button_falls_back_to_default_button(self) -> None:
+        class FakeButton:
+            def __init__(self, text: str, enabled: bool = True, default: bool = False) -> None:
+                self._text = text
+                self._enabled = enabled
+                self._default = default
+
+            def text(self) -> str:
+                return self._text
+
+            def isEnabled(self) -> bool:
+                return self._enabled
+
+            def isDefault(self) -> bool:
+                return self._default
+
+        default_button = FakeButton("Save", default=True)
+        cancel_button = FakeButton("Cancel")
+
+        self.assertIs(
+            _command_enter_preferred_button([cancel_button, default_button]),
+            default_button,
+        )
+
+    def test_command_enter_dialog_candidate_prefers_modal_widget_and_falls_back_to_window(self) -> None:
+        modal_widget = object()
+        watched_window = object()
+
+        class WatchedWithWindow:
+            def __init__(self, window) -> None:
+                self._window = window
+
+            def window(self):
+                return self._window
+
+        self.assertIs(
+            _command_enter_dialog_candidate(WatchedWithWindow(watched_window), modal_widget),
+            modal_widget,
+        )
+        self.assertIs(
+            _command_enter_dialog_candidate(WatchedWithWindow(watched_window), None),
+            watched_window,
+        )
+        self.assertIs(_command_enter_dialog_candidate(object(), None), None)
+
     def test_checkbox_indicator_tick_icon_points_to_svg_asset(self) -> None:
         icon_path = _checkbox_indicator_tick_icon_path()
 
         self.assertEqual(icon_path.name, "checkbox-tick.svg")
+        self.assertTrue(icon_path.exists())
+        self.assertTrue(icon_path.is_file())
+
+    def test_trash_icon_points_to_svg_asset(self) -> None:
+        icon_path = _trash_icon_path()
+
+        self.assertEqual(icon_path.name, "trash-can.svg")
         self.assertTrue(icon_path.exists())
         self.assertTrue(icon_path.is_file())
 
@@ -312,6 +394,71 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertFalse(plan["decomposition"]["should_split"])
         self.assertIn("skip a separate planning pass", plan["summary"])
 
+    def test_tiny_task_fast_path_rejects_explicit_planning_intent(self) -> None:
+        task = StoredTask(
+            task_id="ux-1235",
+            board_id="ux",
+            board_title="UX",
+            title="tooltip spacing fix",
+            phase="backlog",
+            context_notes="This is a large task and needs decomposition before editing the UI.",
+            file_targets=[],
+            acceptance=[],
+            source_kind="ui",
+            source_line_index=-1,
+            plan_status="pending",
+            plan={},
+            artifact_dir="",
+            last_result_status="",
+            last_summary="",
+            last_error="",
+            order=0,
+            created_at="",
+            updated_at="",
+        )
+        config = {
+            "planning": {"auto_plan_tiny_tasks": True},
+            "verification": DEFAULT_CONFIG["verification"],
+        }
+        file_hints = [("taskbot/ui.py", ["launch_ui"], 18.0)]
+
+        self.assertFalse(_should_fast_path_tiny_task(task, file_hints, config))
+
+    def test_tiny_task_fast_path_rejects_broad_file_scope(self) -> None:
+        task = StoredTask(
+            task_id="ux-1236",
+            board_id="ux",
+            board_title="UX",
+            title="tooltip spacing fix",
+            phase="backlog",
+            context_notes="Small UI stylesheet tweak in the task board header.",
+            file_targets=[],
+            acceptance=[],
+            source_kind="ui",
+            source_line_index=-1,
+            plan_status="pending",
+            plan={},
+            artifact_dir="",
+            last_result_status="",
+            last_summary="",
+            last_error="",
+            order=0,
+            created_at="",
+            updated_at="",
+        )
+        config = {
+            "planning": {"auto_plan_tiny_tasks": True},
+            "verification": DEFAULT_CONFIG["verification"],
+        }
+        file_hints = [
+            ("taskbot/ui.py", ["launch_ui"], 18.0),
+            ("taskbot/ui/dialogs.py", ["open_dialog"], 17.5),
+            ("taskbot/ui/widgets.py", ["render_widget"], 16.0),
+            ("taskbot/runner.py", ["_run_task_once"], 15.0),
+        ]
+
+        self.assertFalse(_should_fast_path_tiny_task(task, file_hints, config))
+
     def test_repo_agents_path_prefers_existing_repo_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
@@ -373,6 +520,99 @@ class TaskbotBehaviourTests(unittest.TestCase):
             changed_names = self._run_git(repo_root, "show", "--name-only", "--pretty=format:", "HEAD").splitlines()
             self.assertIn("app.txt", changed_names)
             self.assertNotIn("_taskbot/state/history.jsonl", changed_names)
+
+    def test_runner_publishes_after_implementation_even_if_verification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root, _remote_root = self._create_git_repo_with_remote(Path(tmp))
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["git"] = {
+                "enabled": True,
+                "push_after_commit": True,
+                "require_clean_worktree": True,
+                "remote": "",
+                "commit_message_template": "taskbot: {task_id} {task_title}",
+            }
+
+            task = create_task(
+                config,
+                board_title="General",
+                title="Commit through runner",
+                phase="ready",
+            )
+            task = update_task_fields(
+                config,
+                task.task_id,
+                plan_status="ready",
+                plan={"summary": "Existing implementation plan"},
+            ) or task
+
+            def fake_run_codex_phase(
+                config_arg,
+                repo_root_arg,
+                *,
+                model,
+                reasoning_effort,
+                prompt,
+                artifact_dir,
+                phase_name,
+                output_schema,
+                interrupt_state=None,
+            ) -> CodexRunResult:
+                self.assertEqual(repo_root_arg.resolve(), repo_root.resolve())
+                self.assertEqual(phase_name, "implement")
+                (repo_root / "app.txt").write_text("base\nrunner change\n", encoding="utf-8")
+                return CodexRunResult(
+                    command=["codex", "exec", "implement"],
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    last_message_text="",
+                    parsed_output={
+                        "status": "completed",
+                        "summary": "Implemented the runner change.",
+                        "files_touched": ["app.txt"],
+                        "tests_run": [],
+                        "follow_up_items": [],
+                        "mark_task_as": "completed",
+                    },
+                    json_events=[],
+                )
+
+            def fake_run_verification_steps(repo_root_arg, config_arg, artifact_dir):
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                result = VerificationResult(
+                    name="smoke",
+                    exit_code=1,
+                    duration_seconds=0.01,
+                    command=["python3", "-m", "pytest"],
+                    stdout_path=str(artifact_dir / "smoke.stdout.log"),
+                    stderr_path=str(artifact_dir / "smoke.stderr.log"),
+                )
+                (artifact_dir / "verification.summary.json").write_text(
+                    json.dumps([result.__dict__], indent=2),
+                    encoding="utf-8",
+                )
+                return [result]
+
+            with patch("taskbot.runner._run_codex_phase", side_effect=fake_run_codex_phase), patch(
+                "taskbot.runner.run_verification_steps",
+                side_effect=fake_run_verification_steps,
+            ):
+                summary = _run_task_once(config, task, rebuild_index=False)
+
+            artifact_dir = Path(summary["artifact_dir"])
+            git_payload = json.loads((artifact_dir / "git.result.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(summary["status"], "completed")
+            self.assertFalse(summary["verification"]["all_passed"])
+            self.assertEqual(summary["git"]["status"], "pushed")
+            self.assertEqual(git_payload["status"], "pushed")
+            self.assertTrue(git_payload["commit_created"])
+            self.assertTrue(git_payload["push_attempted"])
+            self.assertTrue(git_payload["push_succeeded"])
+            self.assertEqual(self._run_git(repo_root, "rev-parse", "HEAD"), self._run_git(repo_root, "rev-parse", "@{upstream}"))
+            changed_names = self._run_git(repo_root, "show", "--name-only", "--pretty=format:", "HEAD").splitlines()
+            self.assertIn("app.txt", changed_names)
 
     def test_git_publish_skips_when_publishable_changes_exist_at_session_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

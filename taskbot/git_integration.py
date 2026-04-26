@@ -352,13 +352,11 @@ def publish_git_changes(repo_root: Path,
         )
     branch = branch_result.stdout.strip()
 
-    add_args = ["add", "-A", "--", "."]
-    add_args.extend(":(exclude){0}".format(path_text) for path_text in excluded_paths)
-    add_result = _run_git_logged(repo_root, add_args, log_dir, "add")
-    if add_result.exit_code != 0:
+    current_changes = _git_changed_files(repo_root, excluded_paths)
+    if current_changes["error"]:
         return GitPublishResult(
             status="failed",
-            reason=_first_error([add_result], "git add failed"),
+            reason=current_changes["error"],
             branch=branch,
             remote="",
             commit_message="",
@@ -369,6 +367,31 @@ def publish_git_changes(repo_root: Path,
             push_attempted=False,
             push_succeeded=False,
         )
+
+    paths_to_stage: List[str] = []
+    seen_paths = set()
+    for path_text in current_changes["worktree"] + current_changes["untracked"]:
+        if path_text in seen_paths:
+            continue
+        seen_paths.add(path_text)
+        paths_to_stage.append(path_text)
+
+    if paths_to_stage:
+        add_result = _run_git_logged(repo_root, ["add", "-A", "--", *paths_to_stage], log_dir, "add")
+        if add_result.exit_code != 0:
+            return GitPublishResult(
+                status="failed",
+                reason=_first_error([add_result], "git add failed"),
+                branch=branch,
+                remote="",
+                commit_message="",
+                commit_sha="",
+                changed_files=[],
+                dirty_at_start=dirty_at_start,
+                commit_created=False,
+                push_attempted=False,
+                push_succeeded=False,
+            )
 
     staged_result = _run_git_logged(repo_root, ["diff", "--cached", "--name-only", "--relative", "--"], log_dir, "staged")
     if staged_result.exit_code != 0:

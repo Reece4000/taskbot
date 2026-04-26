@@ -32,6 +32,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "planner": "gpt-5.4",
         "implementer": "gpt-5.4-mini",
         "reviewer": "gpt-5.4-mini",
+        "planner_reasoning_effort": "",
+        "implementer_reasoning_effort": "",
     },
     "codex": {
         "sandbox": "workspace-write",

@@ -23,7 +23,9 @@
   "models": {
     "planner": "gpt-5.4",
     "implementer": "gpt-5.4-mini",
-    "reviewer": "gpt-5.4-mini"
+    "reviewer": "gpt-5.4-mini",
+    "planner_reasoning_effort": "high",
+    "implementer_reasoning_effort": "high"
   },
   "codex": {
     "sandbox": "workspace-write",
@@ -95,13 +97,18 @@
     "terminal_tail_lines": 250
   },
   "verification": {
-    "commands": []
+    "commands": [],
+    "mode": "manual",
+    "instructions": "Manual testing - do not run automated tests."
   },
   "git": {
-    "enabled": false,
+    "enabled": true,
     "push_after_commit": true,
     "require_clean_worktree": true,
     "remote": "",
     "commit_message_template": "taskbot: {task_id} {task_title}"
+  },
+  "planning": {
+    "auto_plan_tiny_tasks": true
   }
 }

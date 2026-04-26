@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from taskbot.terminal_stream import append_terminal_log
 
@@ -202,14 +203,50 @@ def _render_json_event(phase_name: str,
     return None
 
 
+def _terminate_process(process: subprocess.Popen[Any], timeout_seconds: float) -> int:
+    if process.poll() is not None:
+        return int(process.returncode or 0)
+
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except OSError:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    try:
+        return int(process.wait(timeout=timeout_seconds))
+    except subprocess.TimeoutExpired:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        return int(process.wait())
+
+
 def run_codex_exec(repo_root: Path,
                    config: Dict[str, Any],
                    *,
                    model: str,
+                   reasoning_effort: Optional[str] = None,
                    prompt: str,
                    artifact_dir: Path,
                    phase_name: str,
-                   output_schema: Optional[Path] = None) -> CodexRunResult:
+                   output_schema: Optional[Path] = None,
+                   on_process_started: Optional[Callable[[subprocess.Popen[Any], List[str]], None]] = None,
+                   on_process_finished: Optional[Callable[[], None]] = None,
+                   should_terminate: Optional[Callable[[], bool]] = None,
+                   process_termination_timeout: float = 5.0) -> CodexRunResult:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = artifact_dir / "{0}.stdout.log".format(phase_name)
     stderr_path = artifact_dir / "{0}.stderr.log".format(phase_name)
@@ -227,20 +264,27 @@ def run_codex_exec(repo_root: Path,
         "codex",
         "-a",
         str(codex_config.get("ask_for_approval", "never")),
-        "exec",
-        "-",
-        "-C",
-        str(repo_root),
-        "-m",
-        model,
-        "--sandbox",
-        str(codex_config["sandbox"]),
-        "--color",
-        str(codex_config["color"]),
-        "--json",
-        "-o",
-        str(last_message_path),
     ]
+    cleaned_reasoning_effort = "" if reasoning_effort is None else str(reasoning_effort).strip()
+    if cleaned_reasoning_effort:
+        command.extend(["-c", "model_reasoning_effort={0}".format(cleaned_reasoning_effort)])
+    command.extend(
+        [
+            "exec",
+            "-",
+            "-C",
+            str(repo_root),
+            "-m",
+            model,
+            "--sandbox",
+            str(codex_config["sandbox"]),
+            "--color",
+            str(codex_config["color"]),
+            "--json",
+            "-o",
+            str(last_message_path),
+        ]
+    )
 
     if codex_config.get("ephemeral", True):
         command.append("--ephemeral")
@@ -265,63 +309,88 @@ def run_codex_exec(repo_root: Path,
         cwd=repo_root,
         env=env,
         stdin=subprocess.PIPE,
+        start_new_session=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=1,
     )
-    if process.stdin is None or process.stdout is None or process.stderr is None:
-        raise RuntimeError("failed to open Codex subprocess pipes")
 
-    with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open("w", encoding="utf-8") as stderr_handle:
-        process.stdin.write(prompt)
-        process.stdin.close()
+    try:
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise RuntimeError("failed to open Codex subprocess pipes")
 
-        def drain_stdout() -> None:
-            for line in process.stdout:
-                stdout_lines.append(line)
-                stdout_handle.write(line)
-                stdout_handle.flush()
-                if stream_output:
-                    rendered_log = None
-                    rendered_stdout = None
-                    stripped = line.strip()
-                    if stripped.startswith("{") and stripped.endswith("}"):
-                        try:
-                            parsed = json.loads(stripped)
-                        except json.JSONDecodeError:
+        if on_process_started is not None:
+            on_process_started(process, list(command))
+
+        with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open("w", encoding="utf-8") as stderr_handle:
+            process.stdin.write(prompt)
+            process.stdin.close()
+
+            def drain_stdout() -> None:
+                for line in process.stdout:
+                    stdout_lines.append(line)
+                    stdout_handle.write(line)
+                    stdout_handle.flush()
+                    if stream_output:
+                        rendered_log = None
+                        rendered_stdout = None
+                        stripped = line.strip()
+                        if stripped.startswith("{") and stripped.endswith("}"):
+                            try:
+                                parsed = json.loads(stripped)
+                            except json.JSONDecodeError:
+                                rendered_log = "{0} {1}".format(_phase_prefix(phase_name, ansi_log), stripped)
+                                rendered_stdout = "{0} {1}".format(_phase_prefix(phase_name, ansi_stdout), stripped)
+                            else:
+                                if isinstance(parsed, dict):
+                                    rendered_log = _render_json_event(phase_name, parsed, stream_commands, ansi_log)
+                                    rendered_stdout = _render_json_event(phase_name, parsed, stream_commands, ansi_stdout)
+                        elif stripped:
                             rendered_log = "{0} {1}".format(_phase_prefix(phase_name, ansi_log), stripped)
                             rendered_stdout = "{0} {1}".format(_phase_prefix(phase_name, ansi_stdout), stripped)
-                        else:
-                            if isinstance(parsed, dict):
-                                rendered_log = _render_json_event(phase_name, parsed, stream_commands, ansi_log)
-                                rendered_stdout = _render_json_event(phase_name, parsed, stream_commands, ansi_stdout)
-                    elif stripped:
-                        rendered_log = "{0} {1}".format(_phase_prefix(phase_name, ansi_log), stripped)
-                        rendered_stdout = "{0} {1}".format(_phase_prefix(phase_name, ansi_stdout), stripped)
-                    if rendered_log:
-                        append_terminal_log(config, rendered_log)
-                    if rendered_stdout:
-                        print(rendered_stdout, flush=True)
+                        if rendered_log:
+                            append_terminal_log(config, rendered_log)
+                        if rendered_stdout:
+                            print(rendered_stdout, flush=True)
 
-        def drain_stderr() -> None:
-            for line in process.stderr:
-                stderr_lines.append(line)
-                stderr_handle.write(line)
-                stderr_handle.flush()
-                if stream_output and stream_stderr:
-                    log_prefix = _style("[{0}:stderr]".format(phase_name), ANSI_BOLD, ANSI_RED, enabled=ansi_log)
-                    stderr_prefix = _style("[{0}:stderr]".format(phase_name), ANSI_BOLD, ANSI_RED, enabled=ansi_stderr)
-                    append_terminal_log(config, "{0} {1}".format(log_prefix, line.rstrip()))
-                    print("{0} {1}".format(stderr_prefix, line.rstrip()), file=sys.stderr, flush=True)
+            def drain_stderr() -> None:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+                    stderr_handle.write(line)
+                    stderr_handle.flush()
+                    if stream_output and stream_stderr:
+                        log_prefix = _style("[{0}:stderr]".format(phase_name), ANSI_BOLD, ANSI_RED, enabled=ansi_log)
+                        stderr_prefix = _style("[{0}:stderr]".format(phase_name), ANSI_BOLD, ANSI_RED, enabled=ansi_stderr)
+                        append_terminal_log(config, "{0} {1}".format(log_prefix, line.rstrip()))
+                        print("{0} {1}".format(stderr_prefix, line.rstrip()), file=sys.stderr, flush=True)
 
-        stdout_thread = threading.Thread(target=drain_stdout, name="taskbot-codex-stdout", daemon=True)
-        stderr_thread = threading.Thread(target=drain_stderr, name="taskbot-codex-stderr", daemon=True)
-        stdout_thread.start()
-        stderr_thread.start()
-        exit_code = process.wait()
-        stdout_thread.join()
-        stderr_thread.join()
+            stdout_thread = threading.Thread(target=drain_stdout, name="taskbot-codex-stdout", daemon=True)
+            stderr_thread = threading.Thread(target=drain_stderr, name="taskbot-codex-stderr", daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+            try:
+                if should_terminate is not None and should_terminate():
+                    exit_code = _terminate_process(process, process_termination_timeout)
+                else:
+                    while True:
+                        try:
+                            exit_code = int(process.wait(timeout=0.5))
+                            break
+                        except subprocess.TimeoutExpired:
+                            if should_terminate is not None and should_terminate():
+                                exit_code = _terminate_process(process, process_termination_timeout)
+                                break
+            finally:
+                stdout_thread.join()
+                stderr_thread.join()
+    except Exception:
+        if process.poll() is None:
+            _terminate_process(process, process_termination_timeout)
+        raise
+    finally:
+        if on_process_finished is not None:
+            on_process_finished()
 
     completed_stdout = "".join(stdout_lines)
     completed_stderr = "".join(stderr_lines)

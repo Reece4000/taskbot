@@ -15,6 +15,7 @@ STATUS_ALIASES = {
     "needs-testing": "needs_testing",
     "needs_testing": "needs_testing",
     "pending": "pending",
+    "backlog": "pending",
 }
 
 TASK_LINE_RE = re.compile(r"^(\s*-\s*)(\[[^\]]+\]\s*)?(.*?)(\r?\n?)$")
@@ -45,6 +46,15 @@ def _normalise_status(raw_status: Optional[str]) -> str:
         return "pending"
     cleaned = raw_status.strip().lower().strip("[]").strip()
     return STATUS_ALIASES.get(cleaned, "pending")
+
+
+def _status_for_update(raw_status: Optional[str]) -> Optional[str]:
+    if not raw_status:
+        return None
+    cleaned = raw_status.strip().lower().strip("[]").strip()
+    if not cleaned:
+        return None
+    return STATUS_ALIASES.get(cleaned)
 
 
 def parse_tasks(task_file: Path) -> List[TaskItem]:
@@ -129,7 +139,10 @@ def update_task_status(task_file: Path, task_id: str, new_status: str) -> bool:
     if target is None:
         return False
 
-    canonical = "completed" if new_status == "completed" else "needs testing"
+    canonical = _status_for_update(new_status)
+    if canonical is None:
+        return False
+
     original_line = lines[target.line_index]
     match = TASK_LINE_RE.match(original_line)
     if not match:
@@ -138,7 +151,10 @@ def update_task_status(task_file: Path, task_id: str, new_status: str) -> bool:
     prefix = match.group(1)
     text = match.group(3).strip()
     newline = match.group(4)
-    lines[target.line_index] = "{0}[{1}] {2}{3}".format(prefix, canonical, text, newline)
+    if canonical == "pending":
+        lines[target.line_index] = "{0}{1}{2}".format(prefix, text, newline)
+    else:
+        lines[target.line_index] = "{0}[{1}] {2}{3}".format(prefix, canonical.replace("_", " "), text, newline)
     task_file.write_text("".join(lines), encoding="utf-8")
     return True
 

@@ -1073,6 +1073,49 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 hint.setHeight(max(hint.height(), self.heightForWidth(width)))
             return hint
 
+    class _TaskCardFooter(QWidget):
+        def __init__(self, board_title: str, meta_text: str, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._spacing = 8
+
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(self._spacing)
+            layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+            self._board_badge = QLabel(board_title)
+            self._board_badge.setObjectName("BoardBadge")
+            self._board_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self._board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            layout.addWidget(self._board_badge, 0, Qt.AlignLeft | Qt.AlignTop)
+
+            self._meta = _WrappingPlainTextLabel(meta_text)
+            self._meta.setObjectName("TaskMeta")
+            self._meta.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self._meta.setMinimumWidth(0)
+            self._meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            layout.addWidget(self._meta, 1, Qt.AlignLeft | Qt.AlignTop)
+
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        def hasHeightForWidth(self) -> bool:
+            return True
+
+        def heightForWidth(self, width: int) -> int:
+            margins = self.contentsMargins()
+            available_width = max(1, width - margins.left() - margins.right())
+            badge_hint = self._board_badge.sizeHint()
+            meta_width = max(1, available_width - badge_hint.width() - self._spacing)
+            meta_height = self._meta.heightForWidth(meta_width)
+            return max(badge_hint.height(), meta_height) + margins.top() + margins.bottom()
+
+        def sizeHint(self) -> QSize:
+            hint = super().sizeHint()
+            width = self.width() if self.width() > 0 else hint.width()
+            if width > 0:
+                hint.setHeight(max(hint.height(), self.heightForWidth(width)))
+            return hint
+
     def _set_primary_button_default(buttons: QDialogButtonBox, standard_button: Any) -> None:
         primary_button = buttons.button(standard_button)
         if primary_button is not None:
@@ -1862,30 +1905,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 context.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 layout.addWidget(context)
 
-            footer_row = QHBoxLayout()
-            footer_row.setContentsMargins(0, 0, 0, 0)
-            footer_row.setSpacing(8)
-            footer_row.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-
-            board_badge = QLabel(task.board_title)
-            board_badge.setObjectName("BoardBadge")
-            board_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            footer_row.addWidget(board_badge, 0, Qt.AlignLeft | Qt.AlignTop)
-
             meta_parts = ["ready" if task.plan_status == "ready" else "pending"]
             relevant_files = []
             if isinstance(task.plan, dict):
                 relevant_files = task.plan.get("relevant_files", [])
             if isinstance(relevant_files, list) and relevant_files:
                 meta_parts.append("{0} files".format(len(relevant_files)))
-            meta = _WrappingPlainTextLabel(" | ".join(meta_parts))
-            meta.setObjectName("TaskMeta")
-            meta.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            meta.setMinimumWidth(0)
-            meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            footer_row.addWidget(meta, 1, Qt.AlignLeft | Qt.AlignTop)
-            layout.addLayout(footer_row)
+            footer = _TaskCardFooter(task.board_title, " | ".join(meta_parts))
+            footer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            layout.addWidget(footer)
 
             if task.last_error:
                 error = QLabel(task.last_error)

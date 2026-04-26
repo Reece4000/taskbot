@@ -317,6 +317,26 @@ def _load_store_unlocked(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     return _normalise_store(loaded, config)
 
 
+def _board_id_in_use(store: Dict[str, Any], board_id: str) -> bool:
+    return any(
+        isinstance(board, dict) and str(board.get("board_id", "")) == board_id
+        for board in store.get("boards", [])
+    )
+
+
+def _allocate_board_id(store: Dict[str, Any], board_title: str) -> str:
+    base_board_id = _slugify(board_title)
+    if not _board_id_in_use(store, base_board_id):
+        return base_board_id
+
+    suffix = 2
+    while True:
+        candidate = "{0}-{1}".format(base_board_id, suffix)
+        if not _board_id_in_use(store, candidate):
+            return candidate
+        suffix += 1
+
+
 def _ensure_board(store: Dict[str, Any], board_title: str, order_hint: int) -> str:
     if _is_archived_board_title(board_title):
         _ensure_special_boards(store)
@@ -330,8 +350,7 @@ def _ensure_board(store: Dict[str, Any], board_title: str, order_hint: int) -> s
     boards = store["boards"]
     existing = next((board for board in boards if str(board.get("title", "")) == board_title), None)
     if existing is None:
-        existing = next((board for board in boards if str(board.get("board_id", "")) == board_id), None)
-    if existing is None:
+        board_id = _allocate_board_id(store, board_title)
         boards.append(
             {
                 "board_id": board_id,
@@ -340,7 +359,6 @@ def _ensure_board(store: Dict[str, Any], board_title: str, order_hint: int) -> s
             }
         )
     else:
-        existing["title"] = board_title
         existing["order"] = min(int(existing.get("order", order_hint) or order_hint), order_hint)
     _ensure_special_boards(store)
     if existing is not None:

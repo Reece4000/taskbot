@@ -19,6 +19,7 @@ from taskbot.store import (
     StoredTask,
     create_board,
     create_task,
+    edit_task,
     load_store_snapshot,
     rename_board as rename_store_board,
     update_task_fields,
@@ -311,6 +312,42 @@ class TaskbotBehaviourTests(unittest.TestCase):
             self.assertEqual(store["boards"][0]["title"], "Renamed Board")
             self.assertEqual(store["tasks"][0]["board_id"], created["board_id"])
             self.assertEqual(store["tasks"][0]["board_title"], "Renamed Board")
+
+    def test_rename_store_board_does_not_revert_when_old_title_is_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str((repo_root / "_taskbot" / "_tasks.md").resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            original = create_board(config, "Old Board")
+            renamed = rename_store_board(config, original["board_id"], "Renamed Board")
+            recreated = create_board(config, "Old Board")
+            created_task = create_task(config, board_title="Old Board", title="New old-board task")
+            renamed_task = create_task(config, board_title="Renamed Board", title="Task to move")
+            moved_task = edit_task(
+                config,
+                renamed_task.task_id,
+                board_title="Old Board",
+                title=renamed_task.title,
+                context_notes=renamed_task.context_notes,
+                phase=renamed_task.phase,
+            )
+            store = load_store_snapshot(config)
+
+            self.assertIsNotNone(renamed)
+            self.assertIsNotNone(moved_task)
+            self.assertNotEqual(recreated["board_id"], original["board_id"])
+            self.assertEqual(created_task.board_id, recreated["board_id"])
+            self.assertEqual(moved_task.board_id, recreated["board_id"])
+
+            boards_by_id = {
+                str(board["board_id"]): str(board["title"])
+                for board in store["boards"]
+                if isinstance(board, dict)
+            }
+            self.assertEqual(boards_by_id[original["board_id"]], "Renamed Board")
+            self.assertEqual(boards_by_id[recreated["board_id"]], "Old Board")
 
     def test_terminal_refresh_cache_treats_repo_switch_to_blank_as_a_refresh(self) -> None:
         self.assertTrue(_terminal_text_should_refresh("previous repo output", ""))

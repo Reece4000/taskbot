@@ -518,6 +518,125 @@ def _set_drag_highlight(widget: QWidget, active: bool) -> None:
     widget.update()
 
 
+def _read_json_file(path: Path) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _pretty_output_text(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    try:
+        return json.dumps(payload, indent=2, sort_keys=True)
+    except TypeError:
+        return str(payload)
+
+
+def _agent_output_kind_title(kind: str) -> str:
+    if kind == "plan":
+        return "Plan"
+    if kind == "implementation":
+        return "Implementation"
+    return str(kind).replace("_", " ").title()
+
+
+def _agent_output_label(entry: Dict[str, Any]) -> str:
+    phase = PHASE_TITLES.get(str(entry.get("phase", "")).strip(), str(entry.get("phase", "")).replace("_", " ").title())
+    kind = _agent_output_kind_title(str(entry.get("kind", "")).strip())
+    created_at = str(entry.get("created_at", "")).strip()
+    summary = str(entry.get("summary", "")).strip()
+    label = "{0} {1}".format(phase, kind).strip()
+    if created_at:
+        label = "{0} | {1}".format(label, created_at.replace("T", " "))
+    if summary:
+        label = "{0} | {1}".format(label, summary)
+    return label
+
+
+def _task_agent_output_entries(task: StoredTask) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    saved_pairs = set()
+    fallback_pairs = set()
+    seen_output_ids = set()
+
+    def append_entry(entry: Dict[str, Any], *, legacy: bool = False) -> None:
+        phase = str(entry.get("phase", "")).strip()
+        kind = str(entry.get("kind", "")).strip()
+        if not phase or not kind:
+            return
+        output_id = str(entry.get("output_id", "")).strip() or "{0}-{1}".format(phase, kind)
+        if output_id in seen_output_ids:
+            return
+        seen_output_ids.add(output_id)
+        payload = entry.get("payload")
+        normalised = {
+            "output_id": output_id,
+            "phase": phase,
+            "kind": kind,
+            "created_at": str(entry.get("created_at", "")).strip(),
+            "summary": str(entry.get("summary", "")).strip(),
+            "payload": payload,
+            "label": _agent_output_label(entry) + (" (Legacy)" if legacy else ""),
+        }
+        entries.append(normalised)
+
+    for entry in task.agent_outputs:
+        if isinstance(entry, dict):
+            append_entry(entry)
+            saved_pairs.add((str(entry.get("phase", "")).strip(), str(entry.get("kind", "")).strip()))
+
+    if isinstance(task.plan, dict) and task.plan and ("planning", "plan") not in saved_pairs:
+        append_entry(
+            {
+                "output_id": "legacy-plan",
+                "phase": "planning",
+                "kind": "plan",
+                "created_at": task.updated_at or task.created_at,
+                "summary": str(task.plan.get("summary", "")),
+                "payload": task.plan,
+            },
+            legacy=True,
+        )
+        fallback_pairs.add(("planning", "plan"))
+
+    artifact_dir_text = str(task.artifact_dir).strip()
+    if artifact_dir_text:
+        artifact_dir = Path(artifact_dir_text)
+        legacy_files = [
+            ("plan.result.json", "planning", "plan"),
+            ("implement.result.json", "in_progress", "implementation"),
+        ]
+        for filename, phase, kind in legacy_files:
+            if (phase, kind) in saved_pairs or (phase, kind) in fallback_pairs:
+                continue
+            payload = _read_json_file(artifact_dir / filename)
+            if payload is None:
+                continue
+            summary = ""
+            if isinstance(payload, dict):
+                summary = str(payload.get("summary", ""))
+            append_entry(
+                {
+                    "output_id": "legacy-{0}".format(kind),
+                    "phase": phase,
+                    "kind": kind,
+                    "created_at": task.updated_at or task.created_at,
+                    "summary": summary,
+                    "payload": payload,
+                },
+                legacy=True,
+            )
+            fallback_pairs.add((phase, kind))
+
+    entries.sort(key=lambda item: (str(item.get("created_at", "")), str(item.get("output_id", ""))))
+    return entries
+
+
 def _phase_label(phase: str) -> str:
     return PHASE_TITLES.get(phase, phase.replace("_", " ").title())
 
@@ -1019,7 +1138,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.setObjectName("AppDialog")
             self.setWindowTitle("Edit Task")
             self.setModal(False)
-            self.resize(540, 470)
+            self.resize(640, 680)
+            self._agent_output_entries = _task_agent_output_entries(task)
 
             available_boards = list(board_titles)
             if task.board_title and task.board_title not in available_boards:
@@ -1083,6 +1203,28 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.context_input.setPlainText(task.context_notes)
             layout.addWidget(self.context_input)
 
+            outputs_label = QLabel("Agent Output")
+            outputs_label.setObjectName("FieldLabel")
+            layout.addWidget(outputs_label)
+
+            if self._agent_output_entries:
+                self.output_selector = _FormDropdown()
+                for entry in self._agent_output_entries:
+                    self.output_selector.addItem(str(entry.get("label", "")), str(entry.get("output_id", "")))
+                self.output_selector.currentIndexChanged.connect(self._refresh_output_viewer)
+                layout.addWidget(self.output_selector)
+
+                self.output_viewer = QPlainTextEdit()
+                self.output_viewer.setReadOnly(True)
+                self.output_viewer.setMinimumHeight(220)
+                layout.addWidget(self.output_viewer, 1)
+                self._refresh_output_viewer()
+            else:
+                empty_outputs = QLabel("No saved agent output is available for this card yet.")
+                empty_outputs.setObjectName("SidebarCaption")
+                empty_outputs.setWordWrap(True)
+                layout.addWidget(empty_outputs)
+
             buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
             buttons.setObjectName("DialogButtons")
             _set_primary_button_default(buttons, QDialogButtonBox.Save)
@@ -1120,6 +1262,19 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def context_notes(self) -> str:
             return self.context_input.toPlainText().strip()
+
+        def _refresh_output_viewer(self) -> None:
+            viewer = getattr(self, "output_viewer", None)
+            selector = getattr(self, "output_selector", None)
+            if viewer is None or selector is None:
+                return
+            output_id = str(selector.currentData() or "").strip()
+            for entry in self._agent_output_entries:
+                if str(entry.get("output_id", "")).strip() != output_id:
+                    continue
+                viewer.setPlainText(_pretty_output_text(entry.get("payload")))
+                return
+            viewer.clear()
 
         def _create_new_board(self) -> None:
             if self._new_board_callback is None:

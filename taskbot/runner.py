@@ -22,6 +22,7 @@ from taskbot.store import (
     StoredTask,
     apply_task_decomposition,
     apply_plan_result,
+    append_task_agent_output,
     create_task,
     ensure_task_store,
     list_store_tasks,
@@ -702,6 +703,14 @@ def _run_plan_for_task(config: Dict[str, Any],
     _validate_phase_result("plan", plan_result)
     plan_payload = plan_result.parsed_output or {}
     _write_json(artifact_dir / "plan.result.json", plan_payload)
+    append_task_agent_output(
+        config,
+        refreshed_task.task_id,
+        phase="planning",
+        kind="plan",
+        payload=plan_payload,
+        summary=str(plan_payload.get("summary", "")),
+    )
     decomposition = plan_payload.get("decomposition", {})
     should_split = bool(isinstance(decomposition, dict) and decomposition.get("should_split"))
     if should_split:
@@ -879,6 +888,14 @@ def _run_task_once(config: Dict[str, Any],
     _validate_phase_result("implement", implementation_result)
     report = implementation_result.parsed_output or {}
     _write_json(artifact_dir / "implement.result.json", report)
+    append_task_agent_output(
+        config,
+        active_task.task_id,
+        phase="in_progress",
+        kind="implementation",
+        payload=report,
+        summary=str(report.get("summary", "")),
+    )
 
     if _stop_requested(config):
         return {

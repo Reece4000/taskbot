@@ -96,6 +96,44 @@ def _markdown_status_for_phase(phase: str) -> str:
     return "pending"
 
 
+def _normalise_agent_output_entry(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    entry_id = str(payload.get("output_id", "")).strip()
+    phase = str(payload.get("phase", "")).strip()
+    kind = str(payload.get("kind", "")).strip()
+    created_at = str(payload.get("created_at", "")).strip()
+    summary = str(payload.get("summary", "")).strip()
+    if not phase or not kind:
+        return None
+    if not entry_id:
+        payload_text = json.dumps(payload.get("payload"), sort_keys=True, default=str)
+        entry_id = hashlib.sha1(
+            "{0}\n{1}\n{2}\n{3}\n{4}".format(phase, kind, created_at, summary, payload_text).encode("utf-8")
+        ).hexdigest()[:12]
+    return {
+        "output_id": entry_id,
+        "phase": phase,
+        "kind": kind,
+        "created_at": created_at or _now_iso(),
+        "summary": summary,
+        "payload": payload.get("payload"),
+    }
+
+
+def _normalise_agent_outputs(entries: Any) -> List[Dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+    normalised: List[Dict[str, Any]] = []
+    for item in entries:
+        entry = _normalise_agent_output_entry(item)
+        if entry is not None:
+            normalised.append(entry)
+    normalised.sort(key=lambda item: (str(item.get("created_at", "")), str(item.get("output_id", ""))))
+    return normalised
+
+
 @dataclass
 class StoredTask:
     task_id: str
@@ -111,6 +149,7 @@ class StoredTask:
     plan_status: str
     plan: Dict[str, Any]
     artifact_dir: str
+    agent_outputs: List[Dict[str, Any]]
     last_result_status: str
     last_summary: str
     last_error: str
@@ -151,6 +190,7 @@ class StoredTask:
             plan_status=str(payload.get("plan_status", "pending")),
             plan=dict(payload.get("plan", {})),
             artifact_dir=str(payload.get("artifact_dir", "")),
+            agent_outputs=_normalise_agent_outputs(payload.get("agent_outputs", [])),
             last_result_status=str(payload.get("last_result_status", "")),
             last_summary=str(payload.get("last_summary", "")),
             last_error=str(payload.get("last_error", "")),
@@ -174,6 +214,7 @@ class StoredTask:
             "plan_status": self.plan_status,
             "plan": dict(self.plan),
             "artifact_dir": self.artifact_dir,
+            "agent_outputs": _normalise_agent_outputs(self.agent_outputs),
             "last_result_status": self.last_result_status,
             "last_summary": self.last_summary,
             "last_error": self.last_error,
@@ -380,6 +421,7 @@ def _sync_markdown_unlocked(store: Dict[str, Any], config: Dict[str, Any]) -> Di
                     plan_status="pending",
                     plan={},
                     artifact_dir="",
+                    agent_outputs=[],
                     last_result_status="",
                     last_summary="",
                     last_error="",
@@ -590,6 +632,7 @@ def create_task(config: Dict[str, Any],
             plan_status="pending",
             plan={},
             artifact_dir="",
+            agent_outputs=[],
             last_result_status="",
             last_summary="",
             last_error="",
@@ -804,6 +847,7 @@ def apply_task_decomposition(config: Dict[str, Any],
                 plan_status="ready",
                 plan=dict(plan) if isinstance(plan, dict) else {},
                 artifact_dir=artifact_dir,
+                agent_outputs=[],
                 last_result_status="planned",
                 last_summary=str(plan.get("summary", "")) if isinstance(plan, dict) else "",
                 last_error="",
@@ -985,6 +1029,45 @@ def update_task_fields(config: Dict[str, Any], task_id: str, **fields: Any) -> O
                 payload[key] = value
             payload["updated_at"] = _now_iso()
             updated = StoredTask.from_payload(payload)
+            break
+
+    _mutate_store(config, mutate, sync_markdown=True)
+    return updated
+
+
+def append_task_agent_output(config: Dict[str, Any],
+                             task_id: str,
+                             *,
+                             phase: str,
+                             kind: str,
+                             payload: Any,
+                             summary: str = "",
+                             created_at: Optional[str] = None) -> Optional[StoredTask]:
+    updated: Optional[StoredTask] = None
+    entry = _normalise_agent_output_entry(
+        {
+            "phase": phase,
+            "kind": kind,
+            "created_at": created_at or _now_iso(),
+            "summary": summary,
+            "payload": payload,
+        }
+    )
+    if entry is None:
+        return None
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal updated
+        for task_payload in store.get("tasks", []):
+            if not isinstance(task_payload, dict):
+                continue
+            if str(task_payload.get("task_id", "")) != task_id:
+                continue
+            outputs = _normalise_agent_outputs(task_payload.get("agent_outputs", []))
+            outputs.append(entry)
+            task_payload["agent_outputs"] = _normalise_agent_outputs(outputs)
+            task_payload["updated_at"] = _now_iso()
+            updated = StoredTask.from_payload(task_payload)
             break
 
     _mutate_store(config, mutate, sync_markdown=True)

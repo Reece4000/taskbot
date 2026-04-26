@@ -985,6 +985,33 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def createHandle(self) -> QSplitterHandle:
             return _CenteredSplitterHandle(self.orientation(), self)
 
+    class _WrappingPlainTextLabel(QLabel):
+        def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+            super().__init__(text, parent)
+            self.setTextFormat(Qt.PlainText)
+            self.setWordWrap(True)
+            self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+        def hasHeightForWidth(self) -> bool:
+            return True
+
+        def heightForWidth(self, width: int) -> int:
+            margins = self.contentsMargins()
+            available_width = max(1, width - margins.left() - margins.right())
+            text_rect = self.fontMetrics().boundingRect(
+                QRect(0, 0, available_width, 0),
+                int(Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop),
+                self.text(),
+            )
+            return text_rect.height() + margins.top() + margins.bottom()
+
+        def sizeHint(self) -> QSize:
+            hint = super().sizeHint()
+            width = self.width() if self.width() > 0 else hint.width()
+            if width > 0:
+                hint.setHeight(max(hint.height(), self.heightForWidth(width)))
+            return hint
+
     def _set_primary_button_default(buttons: QDialogButtonBox, standard_button: Any) -> None:
         primary_button = buttons.button(standard_button)
         if primary_button is not None:
@@ -1779,13 +1806,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 relevant_files = task.plan.get("relevant_files", [])
             if isinstance(relevant_files, list) and relevant_files:
                 meta_parts.append("{0} files".format(len(relevant_files)))
-            meta = QLabel(" | ".join(meta_parts))
+            meta = _WrappingPlainTextLabel(" | ".join(meta_parts))
             meta.setObjectName("TaskMeta")
-            meta.setTextFormat(Qt.PlainText)
-            meta.setWordWrap(True)
             meta.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            meta.setMinimumWidth(0)
             meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            footer_row.addWidget(meta)
+            footer_row.addWidget(meta, 1, Qt.AlignLeft | Qt.AlignTop)
             layout.addLayout(footer_row)
 
             if task.last_error:

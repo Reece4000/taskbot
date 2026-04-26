@@ -873,6 +873,57 @@ def _taskbot_title_html() -> str:
     )
 
 
+def _wrapped_plain_text_height(label: Any, width: int) -> int:
+    try:
+        from PySide6.QtCore import QRect, Qt
+    except ModuleNotFoundError:
+        return 0
+
+    margins = label.contentsMargins()
+    available_width = max(1, width - margins.left() - margins.right())
+    text_rect = label.fontMetrics().boundingRect(
+        QRect(0, 0, available_width, 0),
+        int(Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop),
+        label.text(),
+    )
+    return text_rect.height() + margins.top() + margins.bottom()
+
+
+def _sync_task_card_footer_heights(footer: Any, badge: Any, meta: Any, spacing: int) -> tuple[int, int]:
+    margins = footer.contentsMargins()
+    content_width = footer.contentsRect().width()
+    if content_width <= 0:
+        content_width = max(1, footer.width() - margins.left() - margins.right())
+
+    badge_width = badge.width() if badge.width() > 0 else badge.sizeHint().width()
+    badge_height = badge.height() if badge.height() > 0 else badge.sizeHint().height()
+    meta_width = max(1, content_width - badge_width - spacing)
+    meta_height = _wrapped_plain_text_height(meta, meta_width)
+    footer_height = max(badge_height, meta_height) + margins.top() + margins.bottom()
+
+    height_changed = False
+    if meta.minimumHeight() != meta_height:
+        meta.setMinimumHeight(meta_height)
+        height_changed = True
+    if footer.minimumHeight() != footer_height:
+        footer.setMinimumHeight(footer_height)
+        height_changed = True
+
+    if height_changed:
+        footer.updateGeometry()
+        footer_layout = footer.layout()
+        if footer_layout is not None:
+            footer_layout.invalidate()
+        parent = footer.parentWidget()
+        if parent is not None:
+            parent.updateGeometry()
+            parent_layout = parent.layout()
+            if parent_layout is not None:
+                parent_layout.invalidate()
+
+    return footer_height, meta_height
+
+
 def launch_ui(config: Dict[str, Any]) -> int:
     preflight_error = _ui_launch_preflight_error()
     if preflight_error is not None:
@@ -1057,14 +1108,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             return True
 
         def heightForWidth(self, width: int) -> int:
-            margins = self.contentsMargins()
-            available_width = max(1, width - margins.left() - margins.right())
-            text_rect = self.fontMetrics().boundingRect(
-                QRect(0, 0, available_width, 0),
-                int(Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop),
-                self.text(),
-            )
-            return text_rect.height() + margins.top() + margins.bottom()
+            return _wrapped_plain_text_height(self, width)
 
         def sizeHint(self) -> QSize:
             hint = super().sizeHint()
@@ -1072,6 +1116,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if width > 0:
                 hint.setHeight(max(hint.height(), self.heightForWidth(width)))
             return hint
+
+        def resizeEvent(self, event) -> None:
+            width_changed = event.size().width() != event.oldSize().width()
+            super().resizeEvent(event)
+            if width_changed:
+                self.updateGeometry()
 
     class _TaskCardFooter(QWidget):
         def __init__(self, board_title: str, meta_text: str, parent: QWidget | None = None) -> None:
@@ -1098,6 +1148,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+        def _sync_heights(self) -> None:
+            _sync_task_card_footer_heights(self, self._board_badge, self._meta, self._spacing)
+
         def hasHeightForWidth(self) -> bool:
             return True
 
@@ -1106,7 +1159,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             available_width = max(1, width - margins.left() - margins.right())
             badge_hint = self._board_badge.sizeHint()
             meta_width = max(1, available_width - badge_hint.width() - self._spacing)
-            meta_height = self._meta.heightForWidth(meta_width)
+            meta_height = _wrapped_plain_text_height(self._meta, meta_width)
             return max(badge_hint.height(), meta_height) + margins.top() + margins.bottom()
 
         def sizeHint(self) -> QSize:
@@ -1115,6 +1168,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if width > 0:
                 hint.setHeight(max(hint.height(), self.heightForWidth(width)))
             return hint
+
+        def showEvent(self, event) -> None:
+            super().showEvent(event)
+            self._sync_heights()
+
+        def resizeEvent(self, event) -> None:
+            width_changed = event.size().width() != event.oldSize().width()
+            super().resizeEvent(event)
+            if width_changed:
+                self._sync_heights()
 
     def _set_primary_button_default(buttons: QDialogButtonBox, standard_button: Any) -> None:
         primary_button = buttons.button(standard_button)

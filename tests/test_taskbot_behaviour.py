@@ -56,7 +56,9 @@ from taskbot.ui import (
     _task_card_can_start_task,
     _terminal_text_should_refresh,
     _taskbot_title_html,
+    _sync_task_card_footer_heights,
     _pending_approval_request,
+    _wrapped_plain_text_height,
     _write_approval_response,
     _ui_launch_preflight_error,
 )
@@ -809,6 +811,95 @@ class TaskbotBehaviourTests(unittest.TestCase):
             dropdown.setCurrentData("one")
 
             self.assertEqual(seen_indices, [1, 0])
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+
+    def test_task_card_footer_sync_allocates_wrapped_meta_height(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        try:
+            try:
+                from PySide6.QtCore import Qt
+                from PySide6.QtWidgets import (
+                    QApplication,
+                    QFrame,
+                    QHBoxLayout,
+                    QLabel,
+                    QSizePolicy,
+                    QVBoxLayout,
+                    QWidget,
+                )
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            app = QApplication.instance() or QApplication([])
+            app.setStyleSheet(
+                """
+                QLabel#BoardBadge {
+                    background: #f5ddcf;
+                    color: #934e2e;
+                    border-radius: 3px;
+                    padding: 2px 5px;
+                    font-size: 10px;
+                    font-weight: 700;
+                }
+
+                QLabel#TaskMeta {
+                    color: #957d6e;
+                    font-size: 10px;
+                    font-weight: 600;
+                }
+                """
+            )
+
+            root = QWidget()
+            root_layout = QVBoxLayout(root)
+            root_layout.setContentsMargins(0, 0, 0, 0)
+
+            card = QFrame()
+            card.setFixedWidth(240)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 9, 12, 9)
+            card_layout.setSpacing(5)
+
+            footer = QWidget()
+            footer_layout = QHBoxLayout(footer)
+            footer_layout.setContentsMargins(0, 0, 0, 0)
+            footer_layout.setSpacing(8)
+            footer_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+            badge = QLabel("general issues and bugs")
+            badge.setObjectName("BoardBadge")
+            badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            footer_layout.addWidget(badge, 0, Qt.AlignLeft | Qt.AlignTop)
+
+            meta = QLabel("ready | 1 files | needs testing")
+            meta.setObjectName("TaskMeta")
+            meta.setTextFormat(Qt.PlainText)
+            meta.setWordWrap(True)
+            meta.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            meta.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            meta.setMinimumWidth(0)
+            footer_layout.addWidget(meta, 1, Qt.AlignLeft | Qt.AlignTop)
+
+            card_layout.addWidget(footer)
+            root_layout.addWidget(card)
+
+            root.show()
+            app.processEvents()
+
+            footer_height, meta_height = _sync_task_card_footer_heights(footer, badge, meta, 8)
+            card_layout.activate()
+            app.processEvents()
+
+            self.assertEqual(meta_height, _wrapped_plain_text_height(meta, meta.width()))
+            self.assertEqual(meta.minimumHeight(), meta_height)
+            self.assertGreaterEqual(meta.height(), meta_height)
+            self.assertEqual(footer.minimumHeight(), footer_height)
+            self.assertGreaterEqual(footer.height(), footer_height)
         finally:
             if original_platform is None:
                 os.environ.pop("QT_QPA_PLATFORM", None)

@@ -179,6 +179,15 @@ def _enabled_verification_commands(config: Dict[str, Any]) -> List[Dict[str, Any
     return [entry for entry in commands if isinstance(entry, dict) and entry.get("enabled", True)]
 
 
+def _preferred_success_phase(config: Dict[str, Any], report_status: str, requested_mark: str) -> str:
+    preferred = requested_mark if requested_mark in ("completed", "needs_testing") else report_status
+    if preferred not in ("completed", "needs_testing"):
+        return preferred
+    if _verification_mode(config) == "manual" and preferred == "completed":
+        return "needs_testing"
+    return preferred
+
+
 def _unique_strings(values: List[str]) -> List[str]:
     seen = set()
     ordered: List[str] = []
@@ -907,16 +916,16 @@ def _run_task_once(config: Dict[str, Any],
 
     report_status = str(report.get("status", "unknown")).strip() or "unknown"
     requested_mark = str(report.get("mark_task_as", "leave_unchanged")).strip() or "leave_unchanged"
+    preferred_success_phase = _preferred_success_phase(config, report_status, requested_mark)
     git_result_payload: Dict[str, Any]
     if report_status in ("completed", "needs_testing"):
-        publish_phase = requested_mark if requested_mark in ("completed", "needs_testing") else report_status
         git_result = publish_git_changes(
             repo_root,
             config,
             artifact_dir,
             active_task,
             report,
-            publish_phase,
+            preferred_success_phase,
             git_session,
         )
         git_result_payload = git_result.to_payload()
@@ -957,9 +966,9 @@ def _run_task_once(config: Dict[str, Any],
     _write_json(artifact_dir / "verification.result.json", verification)
 
     if verification["all_passed"]:
-        if requested_mark in ("completed", "needs_testing"):
-            final_phase = requested_mark
-            mark_task_result = requested_mark
+        if preferred_success_phase in ("completed", "needs_testing"):
+            final_phase = preferred_success_phase
+            mark_task_result = preferred_success_phase
         elif report_status == "blocked":
             final_phase = "blocked"
             mark_task_result = "blocked"

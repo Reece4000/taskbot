@@ -645,6 +645,133 @@ def _task_card_can_start_task(phase: str) -> bool:
     return phase in {"backlog", "planning"}
 
 
+def _create_form_dropdown_class(*,
+                                Qt: Any,
+                                QAction: Any,
+                                QMenu: Any,
+                                QSizePolicy: Any,
+                                QToolButton: Any,
+                                Signal: Any) -> Any:
+    class _FormDropdown(QToolButton):
+        currentIndexChanged = Signal(int)
+
+        def __init__(self, parent: Any = None) -> None:
+            super().__init__(parent)
+            self.setObjectName("DialogDropdown")
+            self.setPopupMode(QToolButton.InstantPopup)
+            self.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            self.setFocusPolicy(Qt.StrongFocus)
+            self.setCursor(Qt.PointingHandCursor)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.setMinimumHeight(32)
+            self._menu = QMenu(self)
+            self._menu.setObjectName("DialogDropdownMenu")
+            self.setMenu(self._menu)
+            self._entries: List[Dict[str, Any]] = []
+            self._current_index = -1
+
+        def _sync_display(self) -> None:
+            current_text = self.currentText()
+            self.setText(current_text)
+            self.setToolTip(current_text)
+
+        def _select_index(self, index: int) -> None:
+            previous_index = self._current_index
+            if index < 0 or index >= len(self._entries):
+                self._current_index = -1
+                self._sync_display()
+            else:
+                self._current_index = index
+                self._sync_display()
+            if self._current_index != previous_index:
+                self.currentIndexChanged.emit(self._current_index)
+
+        def addItem(self, text: str, user_data: Any = None) -> None:
+            label = str(text)
+            data = label if user_data is None else user_data
+            action = QAction(label, self)
+            action.setData(data)
+            index = len(self._entries)
+            action.triggered.connect(lambda _checked=False, selected=index: self.setCurrentIndex(selected))
+            self._menu.addAction(action)
+            self._entries.append({"text": label, "data": data, "action": action})
+            if self._current_index < 0:
+                self._select_index(index)
+
+        def addItems(self, texts: List[str]) -> None:
+            for text in texts:
+                self.addItem(text)
+
+        def addCustomAction(self, text: str, callback: Any) -> Any:
+            if self._entries and self._menu.actions():
+                self._menu.addSeparator()
+            action = self._menu.addAction(text)
+            action.triggered.connect(lambda _checked=False: callback())
+            return action
+
+        def clear(self) -> None:
+            self._menu.clear()
+            self._entries.clear()
+            self._select_index(-1)
+
+        def count(self) -> int:
+            return len(self._entries)
+
+        def currentIndex(self) -> int:
+            return self._current_index
+
+        def currentText(self) -> str:
+            if 0 <= self._current_index < len(self._entries):
+                return str(self._entries[self._current_index]["text"])
+            return ""
+
+        def currentData(self) -> Any:
+            if 0 <= self._current_index < len(self._entries):
+                return self._entries[self._current_index]["data"]
+            return None
+
+        def findText(self, text: str) -> int:
+            target = str(text)
+            for index, entry in enumerate(self._entries):
+                if entry["text"] == target:
+                    return index
+            return -1
+
+        def findData(self, data: Any) -> int:
+            for index, entry in enumerate(self._entries):
+                if entry["data"] == data:
+                    return index
+            return -1
+
+        def setCurrentIndex(self, index: int) -> None:
+            self._select_index(index)
+
+        def setCurrentText(self, text: str) -> None:
+            target = str(text)
+            index = self.findText(target)
+            if index < 0:
+                if target:
+                    self.addItem(target, target)
+                    index = len(self._entries) - 1
+                else:
+                    self._select_index(-1)
+                    return
+            self._select_index(index)
+
+        def setCurrentData(self, data: Any) -> None:
+            index = self.findData(data)
+            if index < 0:
+                if data is None:
+                    self._select_index(-1)
+                    return
+                label = str(data)
+                self.addItem(label, data)
+                index = len(self._entries) - 1
+            self._select_index(index)
+
+    return _FormDropdown
+
+
 def _start_task_run_args(task_id: str) -> List[str]:
     return ["run", "--task-id", task_id]
 
@@ -672,7 +799,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         return 1
 
     try:
-        from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData, QRect
+        from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData, QRect, Signal
         from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette
         from PySide6.QtWidgets import (
             QApplication,
@@ -718,6 +845,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
     app_root = Path(config.get("app_root", Path(__file__).resolve().parents[1])).resolve()
     taskbot_entry = app_root / "taskbot.py"
     ui_state_path = app_root / "state" / "ui_session.json"
+    _FormDropdown = _create_form_dropdown_class(
+        Qt=Qt,
+        QAction=QAction,
+        QMenu=QMenu,
+        QSizePolicy=QSizePolicy,
+        QToolButton=QToolButton,
+        Signal=Signal,
+    )
 
     def _resolve_repo_path(raw_value: str) -> Path:
         candidate = Path(raw_value).expanduser()
@@ -778,119 +913,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if match:
                 return match
         return "Monospace"
-
-    class _FormDropdown(QToolButton):
-        def __init__(self, parent: QWidget | None = None) -> None:
-            super().__init__(parent)
-            self.setObjectName("DialogDropdown")
-            self.setPopupMode(QToolButton.InstantPopup)
-            self.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            self.setFocusPolicy(Qt.StrongFocus)
-            self.setCursor(Qt.PointingHandCursor)
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.setMinimumHeight(32)
-            self._menu = QMenu(self)
-            self._menu.setObjectName("DialogDropdownMenu")
-            self.setMenu(self._menu)
-            self._entries: List[Dict[str, Any]] = []
-            self._current_index = -1
-
-        def _sync_display(self) -> None:
-            current_text = self.currentText()
-            self.setText(current_text)
-            self.setToolTip(current_text)
-
-        def _select_index(self, index: int) -> None:
-            if index < 0 or index >= len(self._entries):
-                self._current_index = -1
-                self._sync_display()
-                return
-            self._current_index = index
-            self._sync_display()
-
-        def addItem(self, text: str, user_data: Any = None) -> None:
-            label = str(text)
-            data = label if user_data is None else user_data
-            action = QAction(label, self)
-            action.setData(data)
-            index = len(self._entries)
-            action.triggered.connect(lambda _checked=False, selected=index: self.setCurrentIndex(selected))
-            self._menu.addAction(action)
-            self._entries.append({"text": label, "data": data, "action": action})
-            if self._current_index < 0:
-                self._select_index(index)
-
-        def addItems(self, texts: List[str]) -> None:
-            for text in texts:
-                self.addItem(text)
-
-        def addCustomAction(self, text: str, callback: Any) -> QAction:
-            if self._entries and self._menu.actions():
-                self._menu.addSeparator()
-            action = self._menu.addAction(text)
-            action.triggered.connect(lambda _checked=False: callback())
-            return action
-
-        def clear(self) -> None:
-            self._menu.clear()
-            self._entries.clear()
-            self._current_index = -1
-            self._sync_display()
-
-        def count(self) -> int:
-            return len(self._entries)
-
-        def currentIndex(self) -> int:
-            return self._current_index
-
-        def currentText(self) -> str:
-            if 0 <= self._current_index < len(self._entries):
-                return str(self._entries[self._current_index]["text"])
-            return ""
-
-        def currentData(self) -> Any:
-            if 0 <= self._current_index < len(self._entries):
-                return self._entries[self._current_index]["data"]
-            return None
-
-        def findText(self, text: str) -> int:
-            target = str(text)
-            for index, entry in enumerate(self._entries):
-                if entry["text"] == target:
-                    return index
-            return -1
-
-        def findData(self, data: Any) -> int:
-            for index, entry in enumerate(self._entries):
-                if entry["data"] == data:
-                    return index
-            return -1
-
-        def setCurrentIndex(self, index: int) -> None:
-            self._select_index(index)
-
-        def setCurrentText(self, text: str) -> None:
-            target = str(text)
-            index = self.findText(target)
-            if index < 0:
-                if target:
-                    self.addItem(target, target)
-                    index = len(self._entries) - 1
-                else:
-                    self._select_index(-1)
-                    return
-            self._select_index(index)
-
-        def setCurrentData(self, data: Any) -> None:
-            index = self.findData(data)
-            if index < 0:
-                if data is None:
-                    self._select_index(-1)
-                    return
-                label = str(data)
-                self.addItem(label, data)
-                index = len(self._entries) - 1
-            self._select_index(index)
 
     class _CenteredSplitterHandle(QSplitterHandle):
         def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:

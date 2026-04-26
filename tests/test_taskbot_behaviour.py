@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -36,6 +37,7 @@ from taskbot.ui import (
     _trash_icon_path,
     RUNNER_CONTROL_TOOLTIPS,
     _config_path_label_for_header,
+    _create_form_dropdown_class,
     _macos_command_line_tools_python,
     _repo_agents_path,
     _start_task_run_args,
@@ -120,6 +122,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
             plan_status="ready",
             plan={},
             artifact_dir="",
+            agent_outputs=[],
             last_result_status="",
             last_summary="",
             last_error="",
@@ -571,6 +574,45 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertEqual(default_button.clicked, 1)
         self.assertEqual(cancel_button.clicked, 0)
 
+    def test_form_dropdown_emits_current_index_changed_on_selection_change(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        try:
+            try:
+                from PySide6.QtCore import Qt, Signal
+                from PySide6.QtGui import QAction
+                from PySide6.QtWidgets import QApplication, QMenu, QSizePolicy, QToolButton
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            app = QApplication.instance() or QApplication([])
+            dropdown_cls = _create_form_dropdown_class(
+                Qt=Qt,
+                QAction=QAction,
+                QMenu=QMenu,
+                QSizePolicy=QSizePolicy,
+                QToolButton=QToolButton,
+                Signal=Signal,
+            )
+
+            dropdown = dropdown_cls()
+            dropdown.addItem("One", "one")
+            dropdown.addItem("Two", "two")
+
+            seen_indices: list[int] = []
+            dropdown.currentIndexChanged.connect(seen_indices.append)
+
+            dropdown.setCurrentIndex(1)
+            dropdown.setCurrentIndex(1)
+            dropdown.setCurrentData("one")
+
+            self.assertEqual(seen_indices, [1, 0])
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+
     def test_checkbox_indicator_tick_icon_points_to_svg_asset(self) -> None:
         icon_path = _checkbox_indicator_tick_icon_path()
 
@@ -687,6 +729,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
             plan_status="pending",
             plan={},
             artifact_dir="",
+            agent_outputs=[],
             last_result_status="",
             last_summary="",
             last_error="",
@@ -729,6 +772,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
             plan_status="pending",
             plan={},
             artifact_dir="",
+            agent_outputs=[],
             last_result_status="",
             last_summary="",
             last_error="",
@@ -759,6 +803,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
             plan_status="pending",
             plan={},
             artifact_dir="",
+            agent_outputs=[],
             last_result_status="",
             last_summary="",
             last_error="",

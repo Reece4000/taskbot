@@ -1568,14 +1568,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
             footer_row = QHBoxLayout()
             footer_row.setContentsMargins(0, 0, 0, 0)
             footer_row.setSpacing(8)
+            footer_row.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
             board_badge = QLabel(task.board_title)
             board_badge.setObjectName("BoardBadge")
+            board_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             board_badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            footer_row.addWidget(board_badge, 1)
+            footer_row.addWidget(board_badge, 0, Qt.AlignLeft | Qt.AlignTop)
 
-            meta_parts = [task.task_id[:8]]
-            meta_parts.append("ready" if task.plan_status == "ready" else "pending")
+            meta_parts = ["ready" if task.plan_status == "ready" else "pending"]
             relevant_files = []
             if isinstance(task.plan, dict):
                 relevant_files = task.plan.get("relevant_files", [])
@@ -1584,6 +1585,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             meta = QLabel(" | ".join(meta_parts))
             meta.setObjectName("TaskMeta")
             meta.setTextFormat(Qt.PlainText)
+            meta.setWordWrap(True)
+            meta.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             footer_row.addWidget(meta)
             layout.addLayout(footer_row)

@@ -479,10 +479,21 @@ def _sync_markdown_unlocked(store: Dict[str, Any], config: Dict[str, Any]) -> Di
     return {"added": added, "updated": updated}
 
 
+def _board_has_markdown_tasks(store: Dict[str, Any], board_id: str) -> bool:
+    for payload in store.get("tasks", []):
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("board_id", "")) != board_id:
+            continue
+        if str(payload.get("source_kind", "")) == "markdown":
+            return True
+    return False
+
+
 def _mutate_store(config: Dict[str, Any],
                   mutator: Callable[[Dict[str, Any]], Any],
                   *,
-                  sync_markdown: bool = True) -> Any:
+                  sync_markdown: bool = False) -> Any:
     path = store_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_path(path)
@@ -507,7 +518,7 @@ def ensure_task_store(config: Dict[str, Any]) -> Path:
     def noop(_store: Dict[str, Any]) -> None:
         return None
 
-    _mutate_store(config, noop, sync_markdown=True)
+    _mutate_store(config, noop, sync_markdown=False)
     return path
 
 
@@ -662,7 +673,7 @@ def create_task(config: Dict[str, Any],
         store["tasks"].append(payload)
         created = StoredTask.from_payload(payload)
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
     if created is None:
         raise RuntimeError("failed to create task")
     return created
@@ -691,7 +702,7 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
             }
             break
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
     if created is None:
         raise RuntimeError("failed to create board")
     return created
@@ -726,6 +737,7 @@ def rename_board(config: Dict[str, Any], board_id: str, board_title: str) -> Opt
 
         board["title"] = cleaned_title
         task_file = Path(config["task_file"])
+        has_markdown_tasks = _board_has_markdown_tasks(store, board_id)
         task_id_map: Dict[str, str] = {}
         for payload in store.get("tasks", []):
             if not isinstance(payload, dict):
@@ -747,12 +759,11 @@ def rename_board(config: Dict[str, Any], board_id: str, board_title: str) -> Opt
             if changed:
                 payload["updated_at"] = _now_iso()
 
-        if task_file.exists():
+        if has_markdown_tasks and task_file.exists():
             file_task_id_map = rename_markdown_board(task_file, old_title, cleaned_title)
             if file_task_id_map:
                 task_id_map.update(file_task_id_map)
-
-        _sync_markdown_unlocked(store, config)
+            _sync_markdown_unlocked(store, config)
         updated = {
             "board_id": board_id,
             "title": cleaned_title,
@@ -760,7 +771,7 @@ def rename_board(config: Dict[str, Any], board_id: str, board_title: str) -> Opt
             "task_id_map": task_id_map,
         }
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
     return updated
 
 
@@ -774,6 +785,7 @@ def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, An
             return
 
         board_title = str(board.get("title", ""))
+        has_markdown_tasks = _board_has_markdown_tasks(store, board_id)
         if board_id == "archived" or board_title.lower() == "archived":
             raise ValueError("the Archived board cannot be deleted")
 
@@ -795,10 +807,9 @@ def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, An
         ]
 
         task_file = Path(config["task_file"])
-        if task_file.exists():
+        if has_markdown_tasks and task_file.exists():
             delete_markdown_board(task_file, board_title)
-
-        _sync_markdown_unlocked(store, config)
+            _sync_markdown_unlocked(store, config)
         deleted = {
             "board_id": board_id,
             "title": board_title,
@@ -807,7 +818,7 @@ def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, An
             "task_ids": removed_task_ids,
         }
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
     return deleted
 
 
@@ -898,7 +909,7 @@ def apply_task_decomposition(config: Dict[str, Any],
             parent_task = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
 
     if parent_task is None:
         raise RuntimeError("failed to update parent task during decomposition")
@@ -976,7 +987,7 @@ def edit_task(config: Dict[str, Any],
             updated = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
 
     if updated and updated.source_kind == "markdown":
         update_task_status(
@@ -1021,12 +1032,21 @@ def move_task_to_board(config: Dict[str, Any], task_id: str, board_id: str) -> O
                 new_task_id = task_id_map.get(old_task_id, old_task_id)
                 if new_task_id != old_task_id:
                     payload["task_id"] = new_task_id
+                _sync_markdown_unlocked(store, config)
+                payload = next(
+                    (
+                        task_payload
+                        for task_payload in store.get("tasks", [])
+                        if isinstance(task_payload, dict) and str(task_payload.get("task_id", "")) == str(payload.get("task_id", ""))
+                    ),
+                    payload,
+                )
             if old_board_title != cleaned_board_title:
                 payload["updated_at"] = _now_iso()
             updated = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
 
     if updated and updated.source_kind == "markdown":
         update_task_status(
@@ -1053,7 +1073,7 @@ def delete_task(config: Dict[str, Any], task_id: str) -> Optional[StoredTask]:
             remaining_tasks.append(payload)
         store["tasks"] = remaining_tasks
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
 
     if deleted and deleted.source_kind == "markdown":
         delete_markdown_task(Path(config["task_file"]), task_id)
@@ -1076,7 +1096,7 @@ def update_task_fields(config: Dict[str, Any], task_id: str, **fields: Any) -> O
             updated = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
     return updated
 
 
@@ -1115,7 +1135,7 @@ def append_task_agent_output(config: Dict[str, Any],
             updated = StoredTask.from_payload(task_payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=True)
+    _mutate_store(config, mutate, sync_markdown=False)
     return updated
 
 

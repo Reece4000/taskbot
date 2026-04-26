@@ -22,6 +22,7 @@ from taskbot.store import (
     edit_task,
     load_store_snapshot,
     rename_board as rename_store_board,
+    sync_markdown_into_store,
     update_task_fields,
 )
 from taskbot.tasks import parse_tasks, rename_board as rename_markdown_board
@@ -302,6 +303,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
             config["task_file"] = str(task_file.resolve())
             config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
 
+            sync_markdown_into_store(config)
             created = create_board(config, "Old Board")
             updated = rename_store_board(config, created["board_id"], "Renamed Board")
             store = load_store_snapshot(config)
@@ -312,6 +314,87 @@ class TaskbotBehaviourTests(unittest.TestCase):
             self.assertEqual(store["boards"][0]["title"], "Renamed Board")
             self.assertEqual(store["tasks"][0]["board_id"], created["board_id"])
             self.assertEqual(store["tasks"][0]["board_title"], "Renamed Board")
+
+    def test_load_store_snapshot_does_not_auto_import_legacy_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            task_file = repo_root / "_taskbot" / "_tasks.md"
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text("# Legacy\n- Migrate me\n", encoding="utf-8")
+
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str(task_file.resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            store = load_store_snapshot(config)
+
+            self.assertEqual(store["tasks"], [])
+            persisted = json.loads(Path(config["store"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(persisted["tasks"], [])
+
+    def test_create_task_does_not_pull_in_legacy_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            task_file = repo_root / "_taskbot" / "_tasks.md"
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text("# Legacy\n- Existing markdown task\n", encoding="utf-8")
+
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str(task_file.resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            created = create_task(config, board_title="General", title="New UI task")
+            store = load_store_snapshot(config)
+
+            self.assertEqual(created.source_kind, "ui")
+            self.assertEqual([task["title"] for task in store["tasks"]], ["New UI task"])
+
+    def test_sync_imports_legacy_markdown_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            task_file = repo_root / "_taskbot" / "_tasks.md"
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text("# Legacy\n- Existing markdown task\n", encoding="utf-8")
+
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str(task_file.resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            result = sync_markdown_into_store(config)
+            store = load_store_snapshot(config)
+
+            self.assertEqual(result["added"], 1)
+            self.assertEqual(len(store["tasks"]), 1)
+            self.assertEqual(store["tasks"][0]["source_kind"], "markdown")
+
+    def test_migrated_markdown_task_edits_still_write_back_without_background_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            task_file = repo_root / "_taskbot" / "_tasks.md"
+            task_file.parent.mkdir(parents=True, exist_ok=True)
+            task_file.write_text("# Legacy\n- Existing markdown task\n", encoding="utf-8")
+
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["task_file"] = str(task_file.resolve())
+            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+
+            sync_markdown_into_store(config)
+            task = load_store_snapshot(config)["tasks"][0]
+            updated = edit_task(
+                config,
+                str(task["task_id"]),
+                board_title="Renamed Legacy",
+                title="Updated markdown task",
+                context_notes="notes",
+                phase="needs_testing",
+            )
+            store = load_store_snapshot(config)
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.source_kind, "markdown")
+            self.assertIn("# Renamed Legacy\n- [needs testing] Updated markdown task\n", task_file.read_text(encoding="utf-8"))
+            self.assertEqual(len(store["tasks"]), 1)
+            self.assertEqual(store["tasks"][0]["title"], "Updated markdown task")
 
     def test_rename_store_board_does_not_revert_when_old_title_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

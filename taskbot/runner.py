@@ -1091,6 +1091,7 @@ def _cmd_index(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
 def _cmd_sync(config: Dict[str, Any]) -> int:
     result = sync_markdown_into_store(config)
+    print("Imported legacy markdown tasks into the YAML store.")
     print(json.dumps(result, indent=2, sort_keys=True))
     print("store:", store_path(config))
     return 0
@@ -1306,7 +1307,10 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--query")
     list_cmd.set_defaults(func=_cmd_list)
 
-    sync_cmd = subparsers.add_parser("sync")
+    sync_cmd = subparsers.add_parser(
+        "sync",
+        help="Import legacy _taskbot/_tasks.md entries into the YAML store",
+    )
     sync_cmd.set_defaults(func=lambda config, args: _cmd_sync(config))
 
     add_task_cmd = subparsers.add_parser("add-task")

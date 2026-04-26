@@ -6,7 +6,7 @@ It is designed to:
 
 - start a fresh Codex session for each planning/execution pass
 - keep prompts small by passing only the selected task plus compact repo index hints
-- update `_taskbot/_tasks.md` statuses without asking the agent to manage the task file directly
+- update migrated `_taskbot/_tasks.md` task statuses without asking the agent to manage the task file directly
 - run repo-local verification commands after implementation
 - optionally commit and push successful implementation changes to the active branch
 - support repo-local execution settings for sandbox, approval policy, models, reasoning effort, and verification mode
@@ -35,7 +35,7 @@ python3 taskbot.py --repo-root /path/to/repo status
 
 ## How It Works
 
-1. Sync `_taskbot/_tasks.md` into `_taskbot/tasks.yaml`.
+1. Import legacy `_taskbot/_tasks.md` content into `_taskbot/tasks.yaml` when you explicitly run `python3 taskbot.py sync`.
 2. Pick the next runnable task from the YAML store.
 3. If the task has not been scoped yet, run a planning pass and store the plan back into the task record.
 4. Small localised tasks can skip the heavyweight planner pass and go straight into implementation with a compact auto-generated plan.
@@ -59,8 +59,9 @@ Taskbot now uses `_taskbot/tasks.yaml` as its internal task store.
 
 - The file is written as JSON-compatible YAML, which keeps the dependency surface small.
 - Writes are atomic and guarded by a file lock.
-- `_taskbot/_tasks.md` is still imported for legacy tasks.
-- Markdown-origin tasks sync `completed` and `needs testing` back to `_taskbot/_tasks.md`. Dragging one back to backlog clears the status marker in the markdown source.
+- Normal CLI/UI startup reads and writes `tasks.yaml` only. Legacy `_taskbot/_tasks.md` content is ignored until you explicitly run `python3 taskbot.py sync`.
+- `python3 taskbot.py sync` is the one-time/on-demand migration path that imports legacy markdown tasks into the YAML store.
+- Already-migrated markdown-origin tasks still sync `completed` and `needs testing` back to `_taskbot/_tasks.md`. Dragging one back to backlog clears the status marker in the markdown source.
 
 This is what allows the CLI loop and a future long-running UI to update tasks safely without save conflicts.
 

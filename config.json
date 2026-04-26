@@ -29,7 +29,7 @@
   },
   "codex": {
     "sandbox": "workspace-write",
-    "ask_for_approval": "never",
+    "ask_for_approval": "on-request",
     "color": "never",
     "ephemeral": true,
     "skip_git_repo_check": true,

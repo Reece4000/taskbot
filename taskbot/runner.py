@@ -290,6 +290,14 @@ def _configured_reasoning_effort(config: Dict[str, Any], role: str) -> Optional[
     return cleaned or None
 
 
+def _model_display(config: Dict[str, Any], role: str) -> str:
+    model = str(config["models"][role])
+    reasoning_effort = _configured_reasoning_effort(config, role)
+    if reasoning_effort is None:
+        return model
+    return "{0} {1}".format(model, reasoning_effort)
+
+
 def _should_fast_path_tiny_task(task: StoredTask,
                                 file_hints: List[Any],
                                 config: Dict[str, Any]) -> bool:
@@ -931,7 +939,7 @@ def _run_task_once(config: Dict[str, Any],
     needs_planning = task.needs_planning()
     planner_model = str(config["models"]["planner"])
     implementer_model = str(config["models"]["implementer"])
-    task_start_model = planner_model if needs_planning else implementer_model
+    task_start_model = _model_display(config, "planner" if needs_planning else "implementer")
     _emit_header(
         config,
         "task start",
@@ -1289,7 +1297,7 @@ def _cmd_plan(config: Dict[str, Any], args: argparse.Namespace) -> int:
             [
                 "task_id={0}".format(task.task_id),
                 "title={0}".format(task.title),
-                "model={0}".format(str(config["models"]["planner"])),
+                "model={0}".format(_model_display(config, "planner")),
             ],
         )
         result = _run_plan_for_task(

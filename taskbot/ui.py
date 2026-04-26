@@ -665,6 +665,10 @@ def _board_summary_text(
     return " | ".join(parts)
 
 
+def _board_header_title(title: str, task_count: int) -> str:
+    return "{0} ({1} tasks)".format(title, max(0, int(task_count)))
+
+
 def _task_card_can_start_task(phase: str) -> bool:
     return phase in {"backlog", "planning"}
 
@@ -2444,30 +2448,37 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_header = QFrame()
             board_header.setObjectName("BoardHeader")
             board_header_layout = QHBoxLayout(board_header)
-            board_header_layout.setContentsMargins(12, 10, 12, 10)
+            board_header_layout.setContentsMargins(12, 8, 12, 8)
             board_header_layout.setSpacing(8)
 
             board_title_stack = QVBoxLayout()
             board_title_stack.setContentsMargins(0, 0, 0, 0)
             board_title_stack.setSpacing(1)
 
-            self.board_title_label = QLabel("All Boards")
+            board_title_row = QHBoxLayout()
+            board_title_row.setContentsMargins(0, 0, 0, 0)
+            board_title_row.setSpacing(8)
+
+            self.board_title_label = QLabel(_board_header_title("All Boards", 0))
             self.board_title_label.setObjectName("BoardTitle")
-            board_title_stack.addWidget(self.board_title_label)
+            board_title_row.addWidget(self.board_title_label)
+            board_title_row.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
+
+            self.board_search_input = QLineEdit()
+            self.board_search_input.setObjectName("BoardSearchInput")
+            self.board_search_input.setClearButtonEnabled(True)
+            self.board_search_input.setPlaceholderText("Filter cards by title")
+            self.board_search_input.setMaximumWidth(240)
+            self.board_search_input.setFixedHeight(28)
+            self.board_search_input.textChanged.connect(self._on_board_search_changed)
+            board_title_row.addWidget(self.board_search_input)
+            board_title_stack.addLayout(board_title_row)
 
             self.board_summary_label = QLabel("")
             self.board_summary_label.setObjectName("BoardSummary")
             self.board_summary_label.setWordWrap(False)
             board_title_stack.addWidget(self.board_summary_label)
             board_header_layout.addLayout(board_title_stack)
-            board_header_layout.addItem(QSpacerItem(12, 12, QSizePolicy.Expanding, QSizePolicy.Minimum))
-
-            self.board_search_input = QLineEdit()
-            self.board_search_input.setClearButtonEnabled(True)
-            self.board_search_input.setPlaceholderText("Filter cards by title")
-            self.board_search_input.setMaximumWidth(240)
-            self.board_search_input.textChanged.connect(self._on_board_search_changed)
-            board_header_layout.addWidget(self.board_search_input)
 
             self.add_task_button = QPushButton("+ Task")
             self.add_task_button.setObjectName("AccentButton")
@@ -2702,6 +2713,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QSpinBox:focus,
             QDialog#AppDialog QToolButton#DialogDropdown:focus {
                 border: 1px solid #c8643b;
+            }
+
+            QLineEdit#BoardSearchInput {
+                padding-top: 4px;
+                padding-bottom: 4px;
             }
 
             QSpinBox:disabled {
@@ -3317,6 +3333,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return None
             return item.data(Qt.UserRole + 1)
 
+        def _selected_board_task_count(self) -> Optional[int]:
+            item = self.board_list.currentItem()
+            if item is None:
+                return None
+            try:
+                return int(item.data(Qt.UserRole + 2) or 0)
+            except (TypeError, ValueError):
+                return 0
+
         def _available_board_titles(self) -> List[str]:
             self._refresh_store_cache()
             return [
@@ -3888,13 +3913,20 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _update_board_header(self, tasks: List[StoredTask], boards: List[Dict[str, Any]]) -> None:
             selected_title = self._selected_board_title()
             if selected_title:
-                self.board_title_label.setText(selected_title)
+                self.board_title_label.setText(
+                    _board_header_title(
+                        selected_title,
+                        self._selected_board_task_count() or len(tasks),
+                    )
+                )
                 self.board_summary_label.setText(
                     _board_summary_text(tasks, self.phase_order)
                 )
             else:
                 active_tasks = self._active_tasks(tasks)
-                self.board_title_label.setText("All Boards")
+                self.board_title_label.setText(
+                    _board_header_title("All Boards", len(active_tasks))
+                )
                 self.board_summary_label.setText(
                     _board_summary_text(
                         active_tasks,

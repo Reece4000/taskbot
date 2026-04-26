@@ -28,6 +28,7 @@ from taskbot.store import (
 from taskbot.tasks import parse_tasks, rename_board as rename_markdown_board
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
+    _board_header_title,
     _board_summary_text,
     _command_enter_modifier,
     _command_enter_shortcut_sequences,
@@ -244,6 +245,10 @@ class TaskbotBehaviourTests(unittest.TestCase):
             _board_summary_text([blocked_task], ["blocked", "needs_testing", "completed"]),
             "1 tasks | Blocked 1 | Needs Testing 0 | Completed 0",
         )
+
+    def test_board_header_title_appends_total_task_count(self) -> None:
+        self.assertEqual(_board_header_title("UX", 3), "UX (3 tasks)")
+        self.assertEqual(_board_header_title("All Boards", 12), "All Boards (12 tasks)")
 
     def test_rename_markdown_board_rewrites_empty_section_headers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2718,14 +2718,6 @@ def launch_ui(config: Dict[str, Any]) -> int:
             load_button.clicked.connect(self._load_repo_from_input)
             repo_row.addWidget(load_button)
 
-            settings_button = QPushButton("Settings")
-            settings_button.clicked.connect(self._open_settings_dialog)
-            repo_row.addWidget(settings_button)
-
-            agents_button = QPushButton("Agents")
-            agents_button.clicked.connect(self._open_agents_dialog)
-            repo_row.addWidget(agents_button)
-
             branch_label = QLabel("Branch")
             branch_label.setObjectName("TopFieldLabel")
             repo_row.addWidget(branch_label)
@@ -2735,6 +2727,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.branch_dropdown.setMinimumWidth(160)
             self.branch_dropdown.currentIndexChanged.connect(self._on_branch_selection_changed)
             repo_row.addWidget(self.branch_dropdown)
+
+            settings_button = QPushButton("Settings")
+            settings_button.clicked.connect(self._open_settings_dialog)
+            repo_row.addWidget(settings_button)
+
+            agents_button = QPushButton("Agents")
+            agents_button.clicked.connect(self._open_agents_dialog)
+            repo_row.addWidget(agents_button)
 
             self.open_terminal_button = QPushButton("Open Terminal")
             self.open_terminal_button.clicked.connect(self._open_repo_terminal)

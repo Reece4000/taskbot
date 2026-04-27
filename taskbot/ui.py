@@ -836,6 +836,7 @@ def _create_form_dropdown_class(*,
             self.setMenu(self._menu)
             self._entries: List[Dict[str, Any]] = []
             self._current_index = -1
+            self._use_foreground_popup = False
 
         def _sync_display(self) -> None:
             current_text = self.currentText()
@@ -975,6 +976,21 @@ def _create_form_dropdown_class(*,
             if self._current_index > index:
                 self._current_index -= 1
                 self._sync_display()
+
+        def setForegroundPopup(self, enabled: bool) -> None:
+            self._use_foreground_popup = bool(enabled)
+
+        def showMenu(self) -> None:
+            if not self._use_foreground_popup:
+                super().showMenu()
+                return
+            menu = self.menu()
+            if menu is None:
+                return
+            menu.setMinimumWidth(max(self.width(), menu.sizeHint().width()))
+            popup_position = self.mapToGlobal(self.rect().bottomLeft())
+            menu.popup(popup_position)
+            menu.raise_()
 
     return _FormDropdown
 
@@ -2919,6 +2935,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.branch_dropdown = _FormDropdown()
             self.branch_dropdown.setObjectName("HeaderBranchDropdown")
             self.branch_dropdown.setMinimumWidth(160)
+            self.branch_dropdown.setForegroundPopup(True)
             self.branch_dropdown.currentIndexChanged.connect(self._on_branch_selection_changed)
             repo_row.addWidget(self.branch_dropdown)
 

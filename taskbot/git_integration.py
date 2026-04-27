@@ -102,7 +102,6 @@ def _excluded_repo_paths(config: Dict[str, Any]) -> List[str]:
         config.get("state_dir", ""),
         config.get("artifact_dir", ""),
         config.get("control_dir", ""),
-        config.get("task_file", ""),
         config.get("store", {}).get("path", ""),
     ]
     excluded: List[str] = []

@@ -181,7 +181,7 @@ Approved plan:
 
 Execution rules:
 - Make the code changes needed for this task.
-- Do not edit the task markdown or task store files directly; the outer runner manages task status.
+- Do not edit the task store or taskbot runtime files directly; the outer runner manages task status.
 - Do not run `git add`, `git commit`, or `git push`; the outer runner handles git publishing when configured.
 - Inspect files surgically with `rg` and `sed -n` instead of broad scans.
 - Preserve established behaviour and interfaces unless the task itself requires a change.

@@ -28,10 +28,8 @@ from taskbot.store import (
     edit_task,
     load_store_snapshot,
     rename_board as rename_store_board,
-    sync_markdown_into_store,
     update_task_fields,
 )
-from taskbot.tasks import parse_tasks, rename_board as rename_markdown_board
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
     _board_header_title,
@@ -56,6 +54,8 @@ from taskbot.ui import (
     _task_card_can_start_task,
     _terminal_text_should_refresh,
     _taskbot_title_html,
+    launch_ui,
+    _sync_dialog_board_titles,
     _sync_task_card_footer_heights,
     _pending_approval_request,
     _wrapped_plain_text_height,
@@ -241,7 +241,18 @@ class TaskbotBehaviourTests(unittest.TestCase):
 
         self.assertEqual(re.sub(r"<[^>]+>", "", title_html), "TASKBOT")
         self.assertEqual(title_html.count("<span style=\"color:"), 7)
-        self.assertTrue(title_html.startswith('<span style="color:#c8643b;">T'))
+        self.assertEqual(
+            title_html,
+            (
+                '<span style="color:#c86b2f;">T</span>'
+                '<span style="color:#c86b2f;">A</span>'
+                '<span style="color:#c86b2f;">S</span>'
+                '<span style="color:#c86b2f;">K</span>'
+                '<span style="color:#5f8f3a;">B</span>'
+                '<span style="color:#5f8f3a;">O</span>'
+                '<span style="color:#5f8f3a;">T</span>'
+            ),
+        )
 
     def test_board_summary_text_for_selected_board_uses_phase_counts(self) -> None:
         planning_task = self._example_stored_task()
@@ -283,43 +294,10 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertEqual(_board_header_title("UX", 3), "UX (3 tasks)")
         self.assertEqual(_board_header_title("All Boards", 12), "All Boards (12 tasks)")
 
-    def test_rename_markdown_board_rewrites_empty_section_headers(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            task_file = Path(tmp) / "_tasks.md"
-            task_file.write_text(
-                "# Old Board\n\n# Other Board\n- unrelated task\n",
-                encoding="utf-8",
-            )
-
-            remap = rename_markdown_board(task_file, "Old Board", "Renamed Board")
-
-            self.assertEqual(remap, {})
-            rewritten = task_file.read_text(encoding="utf-8")
-            self.assertIn("# Renamed Board\n", rewritten)
-            self.assertNotIn("# Old Board\n", rewritten)
-            self.assertEqual(parse_tasks(task_file)[0].section, "Other Board")
-
-    def test_rename_markdown_board_rewrites_populated_section_and_task_ids(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            task_file = Path(tmp) / "_tasks.md"
-            task_file.write_text(
-                "# Old Board\n- First task\n",
-                encoding="utf-8",
-            )
-
-            original_task = parse_tasks(task_file)[0]
-            remap = rename_markdown_board(task_file, "Old Board", "Renamed Board")
-            renamed_task = parse_tasks(task_file)[0]
-
-            self.assertEqual(remap, {original_task.task_id: renamed_task.task_id})
-            self.assertEqual(renamed_task.section, "Renamed Board")
-
     def test_rename_store_board_keeps_empty_board_identity_stable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str((repo_root / "_taskbot" / "_tasks.md").resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
 
             created = create_board(config, "Old Board")
             updated = rename_store_board(config, created["board_id"], "Renamed Board")
@@ -333,27 +311,20 @@ class TaskbotBehaviourTests(unittest.TestCase):
     def test_rename_store_board_keeps_populated_board_tasks_on_the_same_board(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            task_file = repo_root / "_taskbot" / "_tasks.md"
-            task_file.parent.mkdir(parents=True, exist_ok=True)
-            task_file.write_text("# Old Board\n- First task\n", encoding="utf-8")
-
             config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str(task_file.resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
-
-            sync_markdown_into_store(config)
             created = create_board(config, "Old Board")
+            created_task = create_task(config, board_title="Old Board", title="First task")
             updated = rename_store_board(config, created["board_id"], "Renamed Board")
             store = load_store_snapshot(config)
 
             self.assertIsNotNone(updated)
-            self.assertEqual(task_file.read_text(encoding="utf-8"), "# Renamed Board\n- First task\n")
             self.assertEqual(store["boards"][0]["board_id"], created["board_id"])
             self.assertEqual(store["boards"][0]["title"], "Renamed Board")
-            self.assertEqual(store["tasks"][0]["board_id"], created["board_id"])
+            self.assertEqual(store["tasks"][0]["board_id"], created_task.board_id)
             self.assertEqual(store["tasks"][0]["board_title"], "Renamed Board")
+            self.assertEqual(store["tasks"][0]["task_id"], created_task.task_id)
 
-    def test_load_store_snapshot_does_not_auto_import_legacy_markdown(self) -> None:
+    def test_load_store_snapshot_ignores_stray_legacy_task_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             task_file = repo_root / "_taskbot" / "_tasks.md"
@@ -361,85 +332,103 @@ class TaskbotBehaviourTests(unittest.TestCase):
             task_file.write_text("# Legacy\n- Migrate me\n", encoding="utf-8")
 
             config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str(task_file.resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
-
             store = load_store_snapshot(config)
 
             self.assertEqual(store["tasks"], [])
             persisted = json.loads(Path(config["store"]["path"]).read_text(encoding="utf-8"))
             self.assertEqual(persisted["tasks"], [])
 
-    def test_create_task_does_not_pull_in_legacy_markdown(self) -> None:
+    def test_load_store_snapshot_normalises_legacy_markdown_source_kind_to_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            task_file = repo_root / "_taskbot" / "_tasks.md"
-            task_file.parent.mkdir(parents=True, exist_ok=True)
-            task_file.write_text("# Legacy\n- Existing markdown task\n", encoding="utf-8")
-
             config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str(task_file.resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+            store_path = Path(config["store"]["path"])
+            store_path.parent.mkdir(parents=True, exist_ok=True)
+            store_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "phases": list(config["store"]["phases"]),
+                        "boards": [
+                            {
+                                "board_id": "general",
+                                "title": "General",
+                                "order": 0,
+                            }
+                        ],
+                        "tasks": [
+                            {
+                                "task_id": "general-1234abcd",
+                                "board_id": "general",
+                                "board_title": "General",
+                                "title": "Legacy imported task",
+                                "phase": "backlog",
+                                "context_notes": "",
+                                "file_targets": [],
+                                "acceptance": [],
+                                "source_kind": "markdown",
+                                "source_line_index": 12,
+                                "plan_status": "pending",
+                                "plan": {},
+                                "artifact_dir": "",
+                                "agent_outputs": [],
+                                "last_result_status": "",
+                                "last_summary": "",
+                                "last_error": "",
+                                "order": 0,
+                                "created_at": "",
+                                "updated_at": "",
+                            }
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
-            created = create_task(config, board_title="General", title="New UI task")
             store = load_store_snapshot(config)
+            reloaded_payload = json.loads(store_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(created.source_kind, "ui")
-            self.assertEqual([task["title"] for task in store["tasks"]], ["New UI task"])
+            self.assertEqual(store["tasks"][0]["source_kind"], "ui")
+            self.assertEqual(store["tasks"][0]["source_line_index"], -1)
+            self.assertEqual(reloaded_payload["tasks"][0]["source_kind"], "ui")
+            self.assertEqual(reloaded_payload["tasks"][0]["source_line_index"], -1)
 
-    def test_sync_imports_legacy_markdown_only_when_requested(self) -> None:
+    def test_edit_task_updates_legacy_markdown_origin_task_inside_store_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
-            task_file = repo_root / "_taskbot" / "_tasks.md"
-            task_file.parent.mkdir(parents=True, exist_ok=True)
-            task_file.write_text("# Legacy\n- Existing markdown task\n", encoding="utf-8")
-
             config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str(task_file.resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
+            task = create_task(config, board_title="General", title="Legacy imported task")
+            update_task_fields(
+                config,
+                task.task_id,
+                source_kind="markdown",
+                source_line_index=12,
+            )
 
-            result = sync_markdown_into_store(config)
-            store = load_store_snapshot(config)
-
-            self.assertEqual(result["added"], 1)
-            self.assertEqual(len(store["tasks"]), 1)
-            self.assertEqual(store["tasks"][0]["source_kind"], "markdown")
-
-    def test_migrated_markdown_task_edits_still_write_back_without_background_imports(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp)
-            task_file = repo_root / "_taskbot" / "_tasks.md"
-            task_file.parent.mkdir(parents=True, exist_ok=True)
-            task_file.write_text("# Legacy\n- Existing markdown task\n", encoding="utf-8")
-
-            config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str(task_file.resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
-
-            sync_markdown_into_store(config)
-            task = load_store_snapshot(config)["tasks"][0]
             updated = edit_task(
                 config,
-                str(task["task_id"]),
+                task.task_id,
                 board_title="Renamed Legacy",
-                title="Updated markdown task",
+                title="Updated store task",
                 context_notes="notes",
                 phase="needs_testing",
             )
             store = load_store_snapshot(config)
 
             self.assertIsNotNone(updated)
-            self.assertEqual(updated.source_kind, "markdown")
-            self.assertIn("# Renamed Legacy\n- [needs testing] Updated markdown task\n", task_file.read_text(encoding="utf-8"))
+            self.assertEqual(updated.source_kind, "ui")
+            self.assertEqual(updated.board_title, "Renamed Legacy")
+            self.assertEqual(updated.title, "Updated store task")
             self.assertEqual(len(store["tasks"]), 1)
-            self.assertEqual(store["tasks"][0]["title"], "Updated markdown task")
+            self.assertEqual(store["tasks"][0]["board_title"], "Renamed Legacy")
+            self.assertEqual(store["tasks"][0]["title"], "Updated store task")
 
     def test_rename_store_board_does_not_revert_when_old_title_is_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             config = load_config(repo_root, None, app_root=repo_root)
-            config["task_file"] = str((repo_root / "_taskbot" / "_tasks.md").resolve())
-            config["store"]["path"] = str((repo_root / "_taskbot" / "tasks.yaml").resolve())
 
             original = create_board(config, "Old Board")
             renamed = rename_store_board(config, original["board_id"], "Renamed Board")
@@ -470,6 +459,37 @@ class TaskbotBehaviourTests(unittest.TestCase):
             self.assertEqual(boards_by_id[original["board_id"]], "Renamed Board")
             self.assertEqual(boards_by_id[recreated["board_id"]], "Old Board")
 
+    def test_rename_store_board_updates_default_board_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config_path = repo_root / "config.json"
+            config_path.write_text(
+                json.dumps({"store": {"default_board": "General"}}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            config = load_config(repo_root, config_path, app_root=repo_root)
+
+            original = create_board(config, "General")
+            create_task(config, board_title="General", title="Existing task")
+
+            renamed = rename_store_board(config, original["board_id"], "Platform")
+            created_after_rename = create_task(config, board_title="", title="Follow-up task")
+            reloaded_config = load_config(repo_root, config_path, app_root=repo_root)
+            store = load_store_snapshot(reloaded_config)
+
+            self.assertIsNotNone(renamed)
+            self.assertTrue(renamed["default_board_updated"])
+            self.assertEqual(config["store"]["default_board"], "Platform")
+            self.assertEqual(reloaded_config["store"]["default_board"], "Platform")
+            self.assertEqual(created_after_rename.board_title, "Platform")
+            board_titles = {
+                str(board["title"])
+                for board in store["boards"]
+                if isinstance(board, dict)
+            }
+            self.assertIn("Platform", board_titles)
+            self.assertNotIn("General", board_titles)
+
     def test_capture_modeless_dialog_value_keeps_renamed_board_submission(self) -> None:
         dialog = self._FakeAcceptedDialog("Renamed Board")
         submitted_title = _capture_modeless_dialog_value(dialog, dialog.board_title)
@@ -478,6 +498,560 @@ class TaskbotBehaviourTests(unittest.TestCase):
         dialog.set_board_title("Old Board")
 
         self.assertEqual(submitted_title(), "Renamed Board")
+
+    def test_sync_dialog_board_titles_updates_dialogs_with_rename_hook(self) -> None:
+        renamed: list[tuple[str, str]] = []
+
+        class FakeDialog:
+            def rename_board_option(self, old_title: str, new_title: str) -> None:
+                renamed.append((old_title, new_title))
+
+        _sync_dialog_board_titles([FakeDialog(), object(), FakeDialog()], "QA", "Platform")
+
+        self.assertEqual(renamed, [("QA", "Platform"), ("QA", "Platform")])
+
+    def test_sync_dialog_board_titles_ignores_blank_and_unchanged_titles(self) -> None:
+        renamed: list[tuple[str, str]] = []
+
+        class FakeDialog:
+            def rename_board_option(self, old_title: str, new_title: str) -> None:
+                renamed.append((old_title, new_title))
+
+        dialog = FakeDialog()
+        _sync_dialog_board_titles([dialog], "", "Platform")
+        _sync_dialog_board_titles([dialog], "Platform", "Platform")
+
+        self.assertEqual(renamed, [])
+
+    def test_modeless_rename_board_dialog_persists_changes(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                repo_root = Path(tmp)
+                config = load_config(repo_root, None, app_root=repo_root)
+                original_board = create_board(config, "Old Board")
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_open_rename_board_dialog")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+                self.assertTrue(hasattr(window, "_open_rename_board_dialog"))
+
+                window._open_rename_board_dialog(original_board)
+                app.processEvents()
+                dialog = window._open_dialogs[-1]
+                dialog.title_input.setText("Renamed Board")
+                dialog.accept()
+                app.processEvents()
+
+                boards = load_store_snapshot(window.active_config)["boards"]
+                renamed = next(
+                    board
+                    for board in boards
+                    if isinstance(board, dict) and board.get("board_id") == original_board["board_id"]
+                )
+                self.assertEqual(renamed["title"], "Renamed Board")
+                self.assertEqual(window.selected_board_id, original_board["board_id"])
+                self.assertIn("Renamed board Old Board to Renamed Board", window.status_note)
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
+
+    def test_modeless_add_board_dialog_submits_on_return_in_title_input(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtCore import Qt
+                from PySide6.QtTest import QTest
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                repo_root = Path(tmp)
+                config = load_config(repo_root, None, app_root=repo_root)
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_open_add_board_dialog")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+
+                window._open_add_board_dialog()
+                app.processEvents()
+                dialog = window._open_dialogs[-1]
+                dialog.title_input.setText("Platform")
+                dialog.title_input.setFocus()
+                QTest.keyClick(dialog.title_input, Qt.Key_Return)
+                app.processEvents()
+
+                boards = load_store_snapshot(window.active_config)["boards"]
+                created = next(
+                    board
+                    for board in boards
+                    if isinstance(board, dict) and board.get("title") == "Platform"
+                )
+                self.assertEqual(created["board_id"], "platform")
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
+
+    def test_modeless_rename_board_dialog_submits_on_return_in_title_input(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtCore import Qt
+                from PySide6.QtTest import QTest
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                repo_root = Path(tmp)
+                config = load_config(repo_root, None, app_root=repo_root)
+                original_board = create_board(config, "Old Board")
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_open_rename_board_dialog")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+
+                window._open_rename_board_dialog(original_board)
+                app.processEvents()
+                dialog = window._open_dialogs[-1]
+                dialog.title_input.setText("Renamed Board")
+                dialog.title_input.setFocus()
+                QTest.keyClick(dialog.title_input, Qt.Key_Return)
+                app.processEvents()
+
+                boards = load_store_snapshot(window.active_config)["boards"]
+                renamed = next(
+                    board
+                    for board in boards
+                    if isinstance(board, dict) and board.get("board_id") == original_board["board_id"]
+                )
+                self.assertEqual(renamed["title"], "Renamed Board")
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
+
+    def test_modeless_rename_board_dialog_updates_open_edit_dialog_for_needs_testing_task(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                repo_root = Path(tmp)
+                config = load_config(repo_root, None, app_root=repo_root)
+                original_board = create_board(config, "QA")
+                task = create_task(config, board_title="QA", title="Verify release", phase="needs_testing")
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_open_edit_task_dialog")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+
+                window._open_edit_task_dialog(task)
+                app.processEvents()
+                edit_dialog = window._open_dialogs[-1]
+
+                board = next(
+                    item
+                    for item in load_store_snapshot(window.active_config)["boards"]
+                    if isinstance(item, dict) and item.get("board_id") == original_board["board_id"]
+                )
+                window._open_rename_board_dialog(board)
+                app.processEvents()
+                rename_dialog = window._open_dialogs[-1]
+                rename_dialog.title_input.setText("Platform")
+                rename_dialog.accept()
+                app.processEvents()
+
+                self.assertEqual(edit_dialog.board_dropdown.currentText(), "Platform")
+                edit_dialog.accept()
+                app.processEvents()
+
+                store = load_store_snapshot(window.active_config)
+                board_titles = {
+                    str(item["title"])
+                    for item in store["boards"]
+                    if isinstance(item, dict)
+                }
+                updated_task = next(
+                    item
+                    for item in store["tasks"]
+                    if isinstance(item, dict) and item.get("task_id") == task.task_id
+                )
+
+                self.assertIn("Platform", board_titles)
+                self.assertNotIn("QA", board_titles)
+                self.assertEqual(updated_task["board_title"], "Platform")
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
+
+    def test_modeless_rename_board_dialog_persists_changes_after_loading_external_repo(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                app_root = root / "app-root"
+                repo_root = root / "managed-repo"
+                app_root.mkdir(parents=True, exist_ok=True)
+                repo_root.mkdir(parents=True, exist_ok=True)
+                (app_root / "config.json").write_text("{}\n", encoding="utf-8")
+
+                repo_config = load_config(repo_root, None, app_root=app_root)
+                original_board = create_board(repo_config, "Old Board")
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_load_repo_from_input")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                initial_config = load_config(app_root, app_root / "config.json", app_root=app_root)
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(initial_config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+                self.assertTrue(hasattr(window, "_load_repo_from_input"))
+                self.assertTrue(hasattr(window, "_open_rename_board_dialog"))
+
+                window.repo_input.setText(str(repo_root))
+                window._load_repo_from_input()
+                app.processEvents()
+
+                boards = load_store_snapshot(window.active_config)["boards"]
+                board = next(
+                    item
+                    for item in boards
+                    if isinstance(item, dict) and item.get("board_id") == original_board["board_id"]
+                )
+                window._open_rename_board_dialog(board)
+                app.processEvents()
+                dialog = window._open_dialogs[-1]
+                dialog.title_input.setText("Renamed Board")
+                dialog.accept()
+                app.processEvents()
+
+                renamed_boards = load_store_snapshot(window.active_config)["boards"]
+                renamed = next(
+                    item
+                    for item in renamed_boards
+                    if isinstance(item, dict) and item.get("board_id") == original_board["board_id"]
+                )
+                self.assertEqual(Path(window.active_config["repo_root"]), repo_root.resolve())
+                self.assertEqual(renamed["title"], "Renamed Board")
+                self.assertEqual(window.selected_board_id, original_board["board_id"])
+                self.assertIn("Renamed board Old Board to Renamed Board", window.status_note)
+                self.assertIn(
+                    "Renamed Board | 0",
+                    [window.board_list.item(index).text() for index in range(window.board_list.count())],
+                )
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
+
+    def test_modeless_add_board_dialog_targets_loaded_repo_after_repo_switch(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                app_root = root / "app-root"
+                repo_root = root / "managed-repo"
+                app_root.mkdir(parents=True, exist_ok=True)
+                repo_root.mkdir(parents=True, exist_ok=True)
+                (app_root / "config.json").write_text("{}\n", encoding="utf-8")
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_load_repo_from_input")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                initial_config = load_config(app_root, app_root / "config.json", app_root=app_root)
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(initial_config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+                self.assertTrue(hasattr(window, "_load_repo_from_input"))
+                self.assertTrue(hasattr(window, "_open_add_board_dialog"))
+
+                window._open_add_board_dialog()
+                app.processEvents()
+                self.assertEqual(len(window._open_dialogs), 1)
+
+                window.repo_input.setText(str(repo_root))
+                window._load_repo_from_input()
+                app.processEvents()
+
+                self.assertEqual(window._open_dialogs, [])
+                self.assertEqual(Path(window.active_config["repo_root"]), repo_root.resolve())
+
+                window._open_add_board_dialog()
+                app.processEvents()
+                dialog = window._open_dialogs[-1]
+                dialog.title_input.setText("Platform")
+                dialog.accept()
+                app.processEvents()
+
+                boards = load_store_snapshot(window.active_config)["boards"]
+                created = next(
+                    item
+                    for item in boards
+                    if isinstance(item, dict) and item.get("title") == "Platform"
+                )
+                self.assertEqual(created["board_id"], "platform")
+                self.assertEqual(window.selected_board_id, created["board_id"])
+                self.assertIn("Created board Platform", window.status_note)
+                self.assertIn(
+                    "Platform | 0",
+                    [window.board_list.item(index).text() for index in range(window.board_list.count())],
+                )
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
+
+    def test_modeless_rename_board_dialog_updates_default_board_after_loading_external_repo(self) -> None:
+        original_platform = os.environ.get("QT_QPA_PLATFORM")
+        original_headless = os.environ.get("TASKBOT_UI_ALLOW_HEADLESS")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = "1"
+        try:
+            try:
+                from PySide6.QtWidgets import QApplication
+            except ModuleNotFoundError:
+                self.skipTest("PySide6 is not installed")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                app_root = root / "app-root"
+                repo_root = root / "managed-repo"
+                app_root.mkdir(parents=True, exist_ok=True)
+                repo_root.mkdir(parents=True, exist_ok=True)
+                (app_root / "config.json").write_text("{}\n", encoding="utf-8")
+                repo_config_path = repo_root / "_taskbot" / "config.json"
+                repo_config_path.parent.mkdir(parents=True, exist_ok=True)
+                repo_config_path.write_text(
+                    json.dumps({"store": {"default_board": "General"}}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+                repo_config = load_config(repo_root, repo_config_path, app_root=app_root)
+                original_board = create_board(repo_config, "General")
+                create_task(repo_config, board_title="General", title="Existing task")
+                captured: dict[str, object] = {}
+
+                def fake_exec(app) -> int:
+                    top_level = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if hasattr(widget, "_load_repo_from_input")
+                    ]
+                    captured["app"] = app
+                    captured["window"] = top_level[0]
+                    return 0
+
+                initial_config = load_config(app_root, app_root / "config.json", app_root=app_root)
+                with patch("PySide6.QtWidgets.QApplication.exec", fake_exec):
+                    self.assertEqual(launch_ui(initial_config), 0)
+
+                app = captured["app"]
+                window = captured["window"]
+                self.assertIsInstance(app, QApplication)
+                self.assertTrue(hasattr(window, "_load_repo_from_input"))
+
+                window.repo_input.setText(str(repo_root))
+                window._load_repo_from_input()
+                app.processEvents()
+
+                boards = load_store_snapshot(window.active_config)["boards"]
+                board = next(
+                    item
+                    for item in boards
+                    if isinstance(item, dict) and item.get("board_id") == original_board["board_id"]
+                )
+                window._open_rename_board_dialog(board)
+                app.processEvents()
+                dialog = window._open_dialogs[-1]
+                dialog.title_input.setText("Platform")
+                dialog.accept()
+                app.processEvents()
+
+                created_after_rename = create_task(window.active_config, board_title="", title="Follow-up task")
+                reloaded_repo_config = load_config(repo_root, repo_config_path, app_root=app_root)
+                board_titles = {
+                    str(item["title"])
+                    for item in load_store_snapshot(reloaded_repo_config)["boards"]
+                    if isinstance(item, dict)
+                }
+
+                self.assertEqual(created_after_rename.board_title, "Platform")
+                self.assertEqual(reloaded_repo_config["store"]["default_board"], "Platform")
+                self.assertEqual(json.loads(repo_config_path.read_text(encoding="utf-8"))["store"]["default_board"], "Platform")
+                self.assertIn("Platform", board_titles)
+                self.assertNotIn("General", board_titles)
+                window.close()
+                app.processEvents()
+        finally:
+            if original_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = original_platform
+            if original_headless is None:
+                os.environ.pop("TASKBOT_UI_ALLOW_HEADLESS", None)
+            else:
+                os.environ["TASKBOT_UI_ALLOW_HEADLESS"] = original_headless
 
     def test_terminal_refresh_cache_treats_repo_switch_to_blank_as_a_refresh(self) -> None:
         self.assertTrue(_terminal_text_should_refresh("previous repo output", ""))

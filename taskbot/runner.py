@@ -29,7 +29,6 @@ from taskbot.store import (
     phase_labels,
     select_next_task,
     store_path,
-    sync_markdown_into_store,
     update_task_phase,
 )
 from taskbot.terminal_stream import append_terminal_log, format_terminal_header, terminal_log_path
@@ -1198,7 +1197,6 @@ def _cmd_doctor(config: Dict[str, Any]) -> int:
         "codex": shutil.which("codex") is not None,
         "pyside6": __import__("importlib.util").util.find_spec("PySide6") is not None,
     }
-    task_file_exists = Path(config["task_file"]).exists()
     version = ""
     if checks["codex"]:
         completed = subprocess.run(
@@ -1222,7 +1220,6 @@ def _cmd_doctor(config: Dict[str, Any]) -> int:
         print("ui_reason", ui_preflight_error)
     if sys.platform == "darwin":
         print("{0:12} {1}".format("python_gui", "apple-clt" if macos_clt_python else "ok"))
-    print("{0:12} {1}".format("task_file", "ok" if task_file_exists else "optional"))
     print("selected_repo", config["repo_root"])
     if str(config.get("config_path", "")).strip():
         print("config_path", config["config_path"])
@@ -1246,14 +1243,6 @@ def _cmd_list(config: Dict[str, Any], args: argparse.Namespace) -> int:
 def _cmd_index(config: Dict[str, Any], args: argparse.Namespace) -> int:
     index = build_repo_index(Path(config["repo_root"]), config, rebuild=args.rebuild)
     print("indexed", len(index.get("files", {})), "files")
-    return 0
-
-
-def _cmd_sync(config: Dict[str, Any]) -> int:
-    result = sync_markdown_into_store(config)
-    print("Imported legacy markdown tasks into the YAML store.")
-    print(json.dumps(result, indent=2, sort_keys=True))
-    print("store:", store_path(config))
     return 0
 
 
@@ -1466,12 +1455,6 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--include-needs-testing", action="store_true")
     list_cmd.add_argument("--query")
     list_cmd.set_defaults(func=_cmd_list)
-
-    sync_cmd = subparsers.add_parser(
-        "sync",
-        help="Import legacy _taskbot/_tasks.md entries into the YAML store",
-    )
-    sync_cmd.set_defaults(func=lambda config, args: _cmd_sync(config))
 
     add_task_cmd = subparsers.add_parser("add-task")
     add_task_cmd.add_argument("--board", default="General")

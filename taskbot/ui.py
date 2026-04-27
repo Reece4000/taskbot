@@ -273,6 +273,17 @@ def _capture_modeless_dialog_value(dialog: Any, value_reader: Callable[[], Any])
     return read_value
 
 
+def _sync_dialog_board_titles(dialogs: List[Any], old_title: str, new_title: str) -> None:
+    cleaned_old_title = str(old_title).strip()
+    cleaned_new_title = str(new_title).strip()
+    if not cleaned_old_title or not cleaned_new_title or cleaned_old_title == cleaned_new_title:
+        return
+    for dialog in list(dialogs):
+        rename_option = getattr(dialog, "rename_board_option", None)
+        if callable(rename_option):
+            rename_option(cleaned_old_title, cleaned_new_title)
+
+
 def _boards_from_store_snapshot(store: Dict[str, Any]) -> List[Dict[str, Any]]:
     boards: List[Dict[str, Any]] = []
     for payload in store.get("boards", []):
@@ -850,6 +861,37 @@ def _create_form_dropdown_class(*,
                 index = len(self._entries) - 1
             self._select_index(index)
 
+        def replaceItem(self, index: int, text: str, user_data: Any = None) -> None:
+            if index < 0 or index >= len(self._entries):
+                return
+            label = str(text)
+            data = label if user_data is None else user_data
+            entry = self._entries[index]
+            entry["text"] = label
+            entry["data"] = data
+            action = entry["action"]
+            action.setText(label)
+            action.setData(data)
+            if self._current_index == index:
+                self._sync_display()
+
+        def removeItem(self, index: int) -> None:
+            if index < 0 or index >= len(self._entries):
+                return
+            entry = self._entries.pop(index)
+            action = entry["action"]
+            self._menu.removeAction(action)
+            action.deleteLater()
+            if self._current_index == index:
+                if self._entries:
+                    self._select_index(min(index, len(self._entries) - 1))
+                else:
+                    self._select_index(-1)
+                return
+            if self._current_index > index:
+                self._current_index -= 1
+                self._sync_display()
+
     return _FormDropdown
 
 
@@ -859,13 +901,13 @@ def _start_task_run_args(task_id: str) -> List[str]:
 
 def _taskbot_title_html() -> str:
     letters = [
-        ("T", "#9f4f2a"),
+        ("T", "#c86b2f"),
         ("A", "#c86b2f"),
-        ("S", "#e1a13b"),
-        ("K", "#f0c86a"),
-        ("B", "#d8bc92"),
-        ("O", "#8b5a34"),
-        ("T", "#c47a3a"),
+        ("S", "#c86b2f"),
+        ("K", "#c86b2f"),
+        ("B", "#5f8f3a"),
+        ("O", "#5f8f3a"),
+        ("T", "#5f8f3a"),
     ]
     return "".join(
         '<span style="color:{0};">{1}</span>'.format(color, html.escape(letter))
@@ -1254,6 +1296,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.title_input.setPlaceholderText("Board title")
             self.title_input.setMinimumHeight(32)
             self.title_input.setText(board_title)
+            self.title_input.returnPressed.connect(self.accept)
             layout.addWidget(self.title_input)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1332,6 +1375,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.title_input = QLineEdit()
             self.title_input.setPlaceholderText("What needs to be done?")
+            self.title_input.returnPressed.connect(self.accept)
             layout.addWidget(self.title_input)
 
             context_label = QLabel("Context")
@@ -1372,6 +1416,19 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def context_notes(self) -> str:
             return self.context_input.toPlainText().strip()
+
+        def rename_board_option(self, old_title: str, new_title: str) -> None:
+            old_index = self.board_dropdown.findText(old_title)
+            new_index = self.board_dropdown.findText(new_title)
+            current_was_old = self.board_dropdown.currentText().strip() == old_title
+            if old_index >= 0 and new_index < 0:
+                self.board_dropdown.replaceItem(old_index, new_title, new_title)
+            elif old_index >= 0 and new_index >= 0:
+                self.board_dropdown.removeItem(old_index)
+            elif new_index < 0:
+                self.board_dropdown.addItem(new_title, new_title)
+            if current_was_old:
+                self.board_dropdown.setCurrentText(new_title)
 
     class EditTaskDialog(CommandEnterDialog):
         def __init__(self,
@@ -1439,6 +1496,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.title_input = QLineEdit()
             self.title_input.setPlaceholderText("What needs to be done?")
             self.title_input.setText(task.title)
+            self.title_input.returnPressed.connect(self.accept)
             layout.addWidget(self.title_input)
 
             context_label = QLabel("Context")
@@ -1523,6 +1581,21 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 viewer.setPlainText(_pretty_output_text(entry.get("payload")))
                 return
             viewer.clear()
+
+        def rename_board_option(self, old_title: str, new_title: str) -> None:
+            old_index = self.board_dropdown.findText(old_title)
+            new_index = self.board_dropdown.findText(new_title)
+            current_was_old = self.board_dropdown.currentText().strip() == old_title
+            if old_index >= 0 and new_index < 0:
+                self.board_dropdown.replaceItem(old_index, new_title, new_title)
+            elif old_index >= 0 and new_index >= 0:
+                self.board_dropdown.removeItem(old_index)
+            elif new_index < 0:
+                self.board_dropdown.addItem(new_title, new_title)
+            if current_was_old:
+                self.board_dropdown.setCurrentText(new_title)
+            if self.task.board_title == old_title:
+                self.task.board_title = new_title
 
         def _create_new_board(self) -> None:
             if self._new_board_callback is None:
@@ -3633,11 +3706,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
 
             try:
-                self.active_config = _runtime_config_for_repo(repo_root)
+                next_config = _runtime_config_for_repo(repo_root)
             except Exception as exc:
                 QMessageBox.critical(self, "Failed To Load Repository", str(exc))
                 return
 
+            self._dismiss_open_dialogs()
+            self.active_config = next_config
             new_phase_order = phase_labels(self.active_config)
             if new_phase_order != self.phase_order:
                 self._rebuild_phase_columns(new_phase_order)
@@ -3653,11 +3728,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _show_modeless_dialog(self, dialog: QDialog, on_accepted: Any) -> None:
             self._open_dialogs.append(dialog)
             dialog._taskbot_finish_handled = False
+            dialog._taskbot_accept_handled = False
+            dialog.accepted.connect(
+                lambda current_dialog=dialog: self._handle_modeless_dialog_accept(
+                    current_dialog,
+                    on_accepted,
+                )
+            )
             dialog.finished.connect(
                 lambda result, current_dialog=dialog: self._finish_modeless_dialog(
                     current_dialog,
                     result,
-                    on_accepted,
                 )
             )
             dialog.setModal(False)
@@ -3665,17 +3746,27 @@ def launch_ui(config: Dict[str, Any]) -> int:
             dialog.raise_()
             dialog.activateWindow()
 
-        def _finish_modeless_dialog(self, dialog: QDialog, result: int, on_accepted: Any) -> None:
+        def _handle_modeless_dialog_accept(self, dialog: QDialog, on_accepted: Any) -> None:
+            if getattr(dialog, "_taskbot_accept_handled", False):
+                return
+            dialog._taskbot_accept_handled = True
+            on_accepted()
+
+        def _finish_modeless_dialog(self, dialog: QDialog, result: int) -> None:
             if getattr(dialog, "_taskbot_finish_handled", False):
                 return
             dialog._taskbot_finish_handled = True
-            try:
-                if result == QDialog.Accepted:
-                    on_accepted()
-            finally:
-                if dialog in self._open_dialogs:
-                    self._open_dialogs.remove(dialog)
-                dialog.deleteLater()
+            if dialog in self._open_dialogs:
+                self._open_dialogs.remove(dialog)
+            dialog.deleteLater()
+
+        def _dismiss_open_dialogs(self) -> None:
+            for dialog in list(self._open_dialogs):
+                try:
+                    dialog.reject()
+                except RuntimeError:
+                    if dialog in self._open_dialogs:
+                        self._open_dialogs.remove(dialog)
 
         def _activate_repo_config(self, repo_root: Path) -> None:
             self.active_config = _runtime_config_for_repo(repo_root)
@@ -3759,9 +3850,20 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 renamed_board_id = str(updated.get("board_id", board_id)).strip() or board_id
                 self.selected_board_id = renamed_board_id
                 self.status_note = "Renamed board {0} to {1}".format(board.get("title", ""), updated["title"])
+                _sync_dialog_board_titles(self._open_dialogs, str(board.get("title", "")), str(updated["title"]))
                 _save_session(Path(active_config["repo_root"]), self.selected_board_id)
-                self._activate_repo_config(Path(active_config["repo_root"]))
+                self._invalidate_refresh_cache()
                 self.refresh_view()
+                default_board_update_error = str(updated.get("default_board_update_error", "")).strip()
+                if default_board_update_error:
+                    QMessageBox.warning(
+                        self,
+                        "Board Renamed With Config Warning",
+                        (
+                            "The board was renamed, but Taskbot could not update the repo's "
+                            "default board setting:\n\n{0}"
+                        ).format(default_board_update_error),
+                    )
 
             self._show_modeless_dialog(dialog, accept_board)
 
@@ -3769,7 +3871,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             board_title = str(board.get("title", ""))
             task_count = int(board.get("count", 0) or 0)
             task_word = "task" if task_count == 1 else "tasks"
-            detail = "This will remove {0} {1} from the board store and markdown task file.".format(
+            detail = "This will remove {0} {1} from the task store.".format(
                 task_count,
                 task_word,
             )
@@ -3803,10 +3905,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _open_add_board_dialog(self) -> None:
             dialog = AddBoardDialog(self)
             active_config = self.active_config
+            submitted_board_title = _capture_modeless_dialog_value(dialog, dialog.board_title)
 
             def accept_board() -> None:
                 try:
-                    board = create_board(active_config, dialog.board_title())
+                    board = create_board(active_config, submitted_board_title())
                 except Exception as exc:
                     QMessageBox.critical(self, "Failed To Create Board", str(exc))
                     return
@@ -3897,10 +4000,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._show_modeless_dialog(dialog, accept_task_update)
 
         def _delete_task(self, task: StoredTask) -> None:
-            if task.source_kind == "markdown":
-                detail = "This will remove the task from the task store and the markdown task file."
-            else:
-                detail = "This will remove the task from the task store."
+            detail = "This will remove the task from the task store."
 
             confirmed = QMessageBox.question(
                 self,

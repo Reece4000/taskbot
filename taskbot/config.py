@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "task_file": "_taskbot/_tasks.md",
     "state_dir": "_taskbot/state",
     "artifact_dir": "_taskbot/artifacts",
     "control_dir": "_taskbot/control",
@@ -68,7 +67,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "_taskbot/state",
             "_taskbot/control",
             "_taskbot/tasks.yaml",
-            "_taskbot/_tasks.md",
             "_taskbot/README.md",
             "_taskbot/__pycache__",
             "_taskbot/taskbot/__pycache__",
@@ -110,6 +108,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
+LEGACY_TOP_LEVEL_CONFIG_KEYS = (
+    "task_file",
+)
+
 
 def _merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = deepcopy(base)
@@ -119,6 +121,13 @@ def _merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+def _strip_legacy_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(payload)
+    for key in LEGACY_TOP_LEVEL_CONFIG_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
 
 
 def _resolve_path(repo_root: Path, value: str) -> str:
@@ -156,13 +165,14 @@ def load_config(repo_root: Path,
         with config_path.open("r", encoding="utf-8") as handle:
             loaded = json.load(handle)
         config = _merge_dict(config, loaded)
+    config = _strip_legacy_keys(config)
 
     resolved_app_root = (app_root or Path(__file__).resolve().parents[1]).resolve()
     config["repo_root"] = str(repo_root.resolve())
     config["app_root"] = str(resolved_app_root)
     config["config_path"] = str(config_path.resolve()) if config_path is not None else ""
 
-    for key in ("task_file", "state_dir", "artifact_dir", "control_dir"):
+    for key in ("state_dir", "artifact_dir", "control_dir"):
         config[key] = _resolve_path(repo_root, config[key])
     if isinstance(config.get("store"), dict) and "path" in config["store"]:
         config["store"]["path"] = _resolve_path(repo_root, str(config["store"]["path"]))
@@ -187,9 +197,9 @@ def save_config_overrides(config: Dict[str, Any], overrides: Dict[str, Any]) -> 
             loaded = json.load(handle)
         if not isinstance(loaded, dict):
             raise ValueError("config file must contain a JSON object")
-        existing = loaded
+        existing = _strip_legacy_keys(loaded)
 
-    merged = _merge_dict(existing, overrides)
+    merged = _strip_legacy_keys(_merge_dict(existing, overrides))
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with target_path.open("w", encoding="utf-8") as handle:
         json.dump(merged, handle, indent=2)

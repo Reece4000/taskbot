@@ -8,7 +8,7 @@ It is designed to:
 
 - start a fresh Codex session for each planning/execution pass
 - keep prompts small by passing only the selected task plus compact repo index hints
-- update migrated `_taskbot/_tasks.md` task statuses without asking the agent to manage the task file directly
+- keep task tracking fully inside its own repo-local store
 - run repo-local verification commands after implementation
 - optionally commit and push successful implementation changes to the active branch
 - support repo-local execution settings for sandbox, approval policy, models, reasoning effort, and verification mode
@@ -22,7 +22,6 @@ Run from the repo root:
 ```bash
 python3 taskbot.py doctor
 python3 taskbot.py list
-python3 taskbot.py sync
 python3 taskbot.py add-task --board "UI" --title "Example task"
 python3 taskbot.py index --rebuild
 python3 taskbot.py plan
@@ -37,15 +36,14 @@ python3 taskbot.py --repo-root /path/to/repo status
 
 ## How It Works
 
-1. Import legacy `_taskbot/_tasks.md` content into `_taskbot/tasks.yaml` when you explicitly run `python3 taskbot.py sync`.
-2. Pick the next runnable task from the YAML store.
-3. If the task has not been scoped yet, run a planning pass and store the plan back into the task record.
-4. Small localised tasks can skip the heavyweight planner pass and go straight into implementation with a compact auto-generated plan.
-5. Otherwise, on the next pass, run implementation against the stored plan in a fresh Codex session.
-6. Apply any verification commands configured for the selected repo, or skip them when the repo is configured for manual verification.
-7. If git publishing is enabled, taskbot can create a commit and push the active branch after a successful implementation pass.
-8. Move the task through phases such as `backlog`, `planning`, `ready`, `in_progress`, `needs_testing`, `blocked`, and `completed` with the drag-and-drop board UI.
-9. Persist artifacts under `_taskbot/artifacts/`.
+1. Pick the next runnable task from the store.
+2. If the task has not been scoped yet, run a planning pass and store the plan back into the task record.
+3. Small localised tasks can skip the heavyweight planner pass and go straight into implementation with a compact auto-generated plan.
+4. Otherwise, on the next pass, run implementation against the stored plan in a fresh Codex session.
+5. Apply any verification commands configured for the selected repo, or skip them when the repo is configured for manual verification.
+6. If git publishing is enabled, taskbot can create a commit and push the active branch after a successful implementation pass.
+7. Move the task through phases such as `backlog`, `planning`, `ready`, `in_progress`, `needs_testing`, `blocked`, and `completed` with the drag-and-drop board UI.
+8. Persist artifacts under `_taskbot/artifacts/`.
 
 ## Graceful Stop
 
@@ -61,9 +59,7 @@ Taskbot now uses `_taskbot/tasks.yaml` as its internal task store.
 
 - The file is written as JSON-compatible YAML, which keeps the dependency surface small.
 - Writes are atomic and guarded by a file lock.
-- Normal CLI/UI startup reads and writes `tasks.yaml` only. Legacy `_taskbot/_tasks.md` content is ignored until you explicitly run `python3 taskbot.py sync`.
-- `python3 taskbot.py sync` is the one-time/on-demand migration path that imports legacy markdown tasks into the YAML store.
-- Already-migrated markdown-origin tasks still sync `completed` and `needs testing` back to `_taskbot/_tasks.md`. Dragging one back to backlog clears the status marker in the markdown source.
+- Taskbot's workflow is store-only; it does not read from or write to a sidecar markdown task file.
 
 This is what allows the CLI loop and a future long-running UI to update tasks safely without save conflicts.
 
@@ -142,7 +138,7 @@ Git publishing is repo-local and disabled by default.
 - Enable it under `git.enabled` in `taskbot.config.json` or `<repo>/_taskbot/config.json`.
 - Taskbot only attempts git publishing after a successful implementation pass. Planning-only runs do not commit.
 - By default, `git.require_clean_worktree = true` skips publishing if the session started with existing publishable changes or any staged changes.
-- Taskbot excludes its own runtime files such as `_taskbot/artifacts`, `_taskbot/state`, `_taskbot/control`, the task store, and the markdown task file from auto-commits.
+- Taskbot excludes its own runtime files such as `_taskbot/artifacts`, `_taskbot/state`, `_taskbot/control`, and the task store from auto-commits.
 - Pushes use the current branch upstream when available. If there is no upstream, taskbot uses `git.remote` when set, or the single configured remote when there is exactly one.
 - Session artifacts include `_taskbot/artifacts/.../git.result.json` plus per-command stdout/stderr logs under the run's `git/` subdirectory.
 

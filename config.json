@@ -1,5 +1,4 @@
 {
-  "task_file": "_taskbot/_tasks.md",
   "state_dir": "_taskbot/state",
   "artifact_dir": "_taskbot/artifacts",
   "control_dir": "_taskbot/control",
@@ -73,7 +72,6 @@
       "_taskbot/state",
       "_taskbot/control",
       "_taskbot/tasks.yaml",
-      "_taskbot/_tasks.md",
       "_taskbot/README.md",
       "_taskbot/__pycache__",
       "_taskbot/taskbot/__pycache__"

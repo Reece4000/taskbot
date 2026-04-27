@@ -10,16 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from taskbot.tasks import (
-    TaskItem,
-    delete_board as delete_markdown_board,
-    delete_task as delete_markdown_task,
-    rewrite_task as rewrite_markdown_task,
-    parse_tasks,
-    move_task_to_board as move_markdown_task_to_board,
-    rename_board as rename_markdown_board,
-    update_task_status,
-)
+from taskbot.config import save_config_overrides
 
 
 STORE_VERSION = 1
@@ -74,22 +65,6 @@ def _board_sort_key(payload: Dict[str, Any]) -> tuple[int, int, str]:
 
 
 def _task_status_from_phase(phase: str) -> str:
-    if phase == "completed":
-        return "completed"
-    if phase == "needs_testing":
-        return "needs_testing"
-    return "pending"
-
-
-def _phase_from_markdown_status(status: str) -> str:
-    if status == "completed":
-        return "completed"
-    if status == "needs_testing":
-        return "needs_testing"
-    return "backlog"
-
-
-def _markdown_status_for_phase(phase: str) -> str:
     if phase == "completed":
         return "completed"
     if phase == "needs_testing":
@@ -161,16 +136,6 @@ class StoredTask:
     @property
     def status(self) -> str:
         return _task_status_from_phase(self.phase)
-
-    def to_task_item(self) -> TaskItem:
-        return TaskItem(
-            task_id=self.task_id,
-            line_index=self.source_line_index,
-            section=self.board_title,
-            text=self.title,
-            status=self.status,
-            raw_line=self.title,
-        )
 
     def needs_planning(self) -> bool:
         return self.plan_status != "ready" or not self.plan
@@ -256,7 +221,20 @@ def _normalise_store(store: Dict[str, Any], config: Dict[str, Any]) -> Dict[str,
     normalised.setdefault("version", STORE_VERSION)
     normalised.setdefault("phases", list(config.get("store", {}).get("phases", DEFAULT_PHASES)))
     normalised.setdefault("boards", [])
-    normalised.setdefault("tasks", [])
+    raw_tasks = normalised.get("tasks", [])
+    if not isinstance(raw_tasks, list):
+        raw_tasks = []
+    tasks: List[Any] = []
+    for raw_payload in raw_tasks:
+        if not isinstance(raw_payload, dict):
+            tasks.append(raw_payload)
+            continue
+        payload = dict(raw_payload)
+        if str(payload.get("source_kind", "ui")).strip().lower() != "ui":
+            payload["source_kind"] = "ui"
+            payload["source_line_index"] = -1
+        tasks.append(payload)
+    normalised["tasks"] = tasks
     return normalised
 
 
@@ -401,99 +379,23 @@ def _board_title_in_use(store: Dict[str, Any], board_title: str, *, exclude_boar
     return False
 
 
-def _sync_markdown_unlocked(store: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, int]:
-    _ensure_special_boards(store)
-    task_file = Path(config["task_file"])
-    if not task_file.exists():
-        return {"added": 0, "updated": 0}
-
-    parsed = parse_tasks(task_file)
-    by_id = {
-        str(task_payload.get("task_id", "")): task_payload
-        for task_payload in store["tasks"]
-        if isinstance(task_payload, dict)
-    }
-    added = 0
-    updated = 0
-    next_order = max((int(task_payload.get("order", 0) or 0) for task_payload in store["tasks"]), default=-1) + 1
-    seen_boards: Dict[str, int] = {}
-
-    for markdown_task in parsed:
-        board_order = seen_boards.setdefault(markdown_task.section, len(seen_boards))
-        board_id = _ensure_board(store, markdown_task.section, board_order)
-        payload = by_id.get(markdown_task.task_id)
-        markdown_phase = _phase_from_markdown_status(markdown_task.status)
-
-        if payload is None:
-            store["tasks"].append(
-                StoredTask(
-                    task_id=markdown_task.task_id,
-                    board_id=board_id,
-                    board_title=markdown_task.section,
-                    title=markdown_task.text,
-                    phase=markdown_phase,
-                    context_notes="",
-                    file_targets=[],
-                    acceptance=[],
-                    source_kind="markdown",
-                    source_line_index=markdown_task.line_index,
-                    plan_status="pending",
-                    plan={},
-                    artifact_dir="",
-                    agent_outputs=[],
-                    last_result_status="",
-                    last_summary="",
-                    last_error="",
-                    order=next_order,
-                    created_at=_now_iso(),
-                    updated_at=_now_iso(),
-                ).to_payload()
-            )
-            next_order += 1
-            added += 1
-            continue
-
-        changed = False
-        if str(payload.get("board_id", "")) != board_id:
-            payload["board_id"] = board_id
-            changed = True
-        if str(payload.get("board_title", "")) != markdown_task.section:
-            payload["board_title"] = markdown_task.section
-            changed = True
-        if str(payload.get("title", "")) != markdown_task.text:
-            payload["title"] = markdown_task.text
-            changed = True
-        if int(payload.get("source_line_index", -1) or -1) != markdown_task.line_index:
-            payload["source_line_index"] = markdown_task.line_index
-            changed = True
-        if str(payload.get("source_kind", "")) == "markdown" and markdown_phase in ("completed", "needs_testing"):
-            if str(payload.get("phase", "")) != markdown_phase:
-                payload["phase"] = markdown_phase
-                changed = True
-
-        if changed:
-            payload["updated_at"] = _now_iso()
-            updated += 1
-
-    store["tasks"].sort(key=lambda task_payload: (int(task_payload.get("order", 0) or 0), str(task_payload.get("title", ""))))
-    return {"added": added, "updated": updated}
+def _is_default_board_title(config: Dict[str, Any], board_title: str) -> bool:
+    configured = str(config.get("store", {}).get("default_board", "General")).strip()
+    return configured.casefold() == str(board_title).strip().casefold()
 
 
-def _board_has_markdown_tasks(store: Dict[str, Any], board_id: str) -> bool:
-    for payload in store.get("tasks", []):
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get("board_id", "")) != board_id:
-            continue
-        if str(payload.get("source_kind", "")) == "markdown":
-            return True
-    return False
+def _update_default_board_config(config: Dict[str, Any], board_title: str) -> Optional[str]:
+    store_config = config.setdefault("store", {})
+    store_config["default_board"] = board_title
+    try:
+        save_config_overrides(config, {"store": {"default_board": board_title}})
+    except Exception as exc:
+        return str(exc)
+    return None
 
 
 def _mutate_store(config: Dict[str, Any],
-                  mutator: Callable[[Dict[str, Any]], Any],
-                  *,
-                  sync_markdown: bool = False) -> Any:
+                  mutator: Callable[[Dict[str, Any]], Any]) -> Any:
     path = store_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_path(path)
@@ -502,8 +404,6 @@ def _mutate_store(config: Dict[str, Any],
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         store = _load_store_unlocked(path, config)
-        if sync_markdown:
-            _sync_markdown_unlocked(store, config)
         _ensure_special_boards(store)
         result = mutator(store)
         _ensure_special_boards(store)
@@ -518,19 +418,8 @@ def ensure_task_store(config: Dict[str, Any]) -> Path:
     def noop(_store: Dict[str, Any]) -> None:
         return None
 
-    _mutate_store(config, noop, sync_markdown=False)
+    _mutate_store(config, noop)
     return path
-
-
-def sync_markdown_into_store(config: Dict[str, Any]) -> Dict[str, int]:
-    result: Dict[str, int] = {}
-
-    def mutate(store: Dict[str, Any]) -> None:
-        nonlocal result
-        result = _sync_markdown_unlocked(store, config)
-
-    _mutate_store(config, mutate, sync_markdown=False)
-    return result
 
 
 def load_store_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -673,7 +562,7 @@ def create_task(config: Dict[str, Any],
         store["tasks"].append(payload)
         created = StoredTask.from_payload(payload)
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
     if created is None:
         raise RuntimeError("failed to create task")
     return created
@@ -702,7 +591,7 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
             }
             break
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
     if created is None:
         raise RuntimeError("failed to create board")
     return created
@@ -710,9 +599,11 @@ def create_board(config: Dict[str, Any], board_title: str) -> Dict[str, Any]:
 
 def rename_board(config: Dict[str, Any], board_id: str, board_title: str) -> Optional[Dict[str, Any]]:
     updated: Optional[Dict[str, Any]] = None
+    renamed_default_board = False
+    renamed_default_board_title = ""
 
     def mutate(store: Dict[str, Any]) -> None:
-        nonlocal updated
+        nonlocal updated, renamed_default_board, renamed_default_board_title
         cleaned_title = board_title.strip()
         if not cleaned_title:
             raise ValueError("board title cannot be empty")
@@ -735,43 +626,31 @@ def rename_board(config: Dict[str, Any], board_id: str, board_title: str) -> Opt
         if _board_title_in_use(store, cleaned_title, exclude_board_id=board_id):
             raise ValueError("board title already exists")
 
+        renamed_default_board = _is_default_board_title(config, old_title)
+        renamed_default_board_title = cleaned_title
         board["title"] = cleaned_title
-        task_file = Path(config["task_file"])
-        has_markdown_tasks = _board_has_markdown_tasks(store, board_id)
-        task_id_map: Dict[str, str] = {}
         for payload in store.get("tasks", []):
             if not isinstance(payload, dict):
                 continue
             if str(payload.get("board_id", "")) != board_id:
                 continue
 
-            changed = False
             if str(payload.get("board_title", "")) != cleaned_title:
                 payload["board_title"] = cleaned_title
-                changed = True
-            if str(payload.get("source_kind", "")) == "markdown":
-                old_task_id = str(payload.get("task_id", ""))
-                new_task_id = _stable_task_id(cleaned_title, str(payload.get("title", "")))
-                if old_task_id != new_task_id:
-                    task_id_map[old_task_id] = new_task_id
-                    payload["task_id"] = new_task_id
-                    changed = True
-            if changed:
                 payload["updated_at"] = _now_iso()
 
-        if has_markdown_tasks and task_file.exists():
-            file_task_id_map = rename_markdown_board(task_file, old_title, cleaned_title)
-            if file_task_id_map:
-                task_id_map.update(file_task_id_map)
-            _sync_markdown_unlocked(store, config)
         updated = {
             "board_id": board_id,
             "title": cleaned_title,
             "order": int(board.get("order", 0) or 0),
-            "task_id_map": task_id_map,
         }
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
+    if updated is not None and renamed_default_board:
+        default_board_error = _update_default_board_config(config, renamed_default_board_title)
+        updated["default_board_updated"] = default_board_error is None
+        if default_board_error is not None:
+            updated["default_board_update_error"] = default_board_error
     return updated
 
 
@@ -785,7 +664,6 @@ def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, An
             return
 
         board_title = str(board.get("title", ""))
-        has_markdown_tasks = _board_has_markdown_tasks(store, board_id)
         if board_id == "archived" or board_title.lower() == "archived":
             raise ValueError("the Archived board cannot be deleted")
 
@@ -806,10 +684,6 @@ def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, An
             if not (isinstance(payload, dict) and str(payload.get("board_id", "")) == board_id)
         ]
 
-        task_file = Path(config["task_file"])
-        if has_markdown_tasks and task_file.exists():
-            delete_markdown_board(task_file, board_title)
-            _sync_markdown_unlocked(store, config)
         deleted = {
             "board_id": board_id,
             "title": board_title,
@@ -818,7 +692,7 @@ def delete_board(config: Dict[str, Any], board_id: str) -> Optional[Dict[str, An
             "task_ids": removed_task_ids,
         }
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
     return deleted
 
 
@@ -909,16 +783,10 @@ def apply_task_decomposition(config: Dict[str, Any],
             parent_task = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
 
     if parent_task is None:
         raise RuntimeError("failed to update parent task during decomposition")
-    if parent_task.source_kind == "markdown":
-        update_task_status(
-            Path(config["task_file"]),
-            parent_task_id,
-            _markdown_status_for_phase(parent_task.phase),
-        )
 
     return {
         "parent_task": parent_task,
@@ -945,56 +813,23 @@ def edit_task(config: Dict[str, Any],
         if cleaned_phase not in phase_labels(config):
             raise ValueError("invalid task phase: {0}".format(cleaned_phase))
 
-        task_file = Path(config["task_file"])
         for payload in store.get("tasks", []):
             if not isinstance(payload, dict):
                 continue
             if str(payload.get("task_id", "")) != task_id:
                 continue
 
-            current_task_id = task_id
-            if str(payload.get("source_kind", "")) == "markdown" and task_file.exists():
-                requested_board = str(payload.get("board_title", "")) != cleaned_board
-                requested_title = str(payload.get("title", "")) != cleaned_title
-                if requested_board or requested_title:
-                    task_id_map = rewrite_markdown_task(
-                        task_file,
-                        task_id,
-                        new_text=cleaned_title,
-                        new_section=cleaned_board,
-                    )
-                    current_task_id = task_id_map.get(task_id, task_id)
-                    payload["task_id"] = current_task_id
-
-                _sync_markdown_unlocked(store, config)
-                payload = next(
-                    (
-                        task_payload
-                        for task_payload in store.get("tasks", [])
-                        if isinstance(task_payload, dict) and str(task_payload.get("task_id", "")) == current_task_id
-                    ),
-                    payload,
-                )
-            else:
-                board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
-                payload["board_id"] = board_id
-                payload["board_title"] = cleaned_board
-                payload["title"] = cleaned_title
-
+            board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
+            payload["board_id"] = board_id
+            payload["board_title"] = cleaned_board
+            payload["title"] = cleaned_title
             payload["context_notes"] = context_notes.strip()
             payload["phase"] = cleaned_phase
             payload["updated_at"] = _now_iso()
             updated = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=False)
-
-    if updated and updated.source_kind == "markdown":
-        update_task_status(
-            Path(config["task_file"]),
-            updated.task_id,
-            _markdown_status_for_phase(updated.phase),
-        )
+    _mutate_store(config, mutate)
     return updated
 
 
@@ -1011,14 +846,12 @@ def move_task_to_board(config: Dict[str, Any], task_id: str, board_id: str) -> O
             return
 
         cleaned_board_title = str(board.get("title", ARCHIVED_BOARD_TITLE)).strip() or ARCHIVED_BOARD_TITLE
-        task_file = Path(config["task_file"])
         for payload in store.get("tasks", []):
             if not isinstance(payload, dict):
                 continue
             if str(payload.get("task_id", "")) != task_id:
                 continue
 
-            old_task_id = str(payload.get("task_id", ""))
             old_board_title = str(payload.get("board_title", ""))
             current_board_id = str(payload.get("board_id", ""))
             if current_board_id == str(board.get("board_id", board_id)) and old_board_title == cleaned_board_title:
@@ -1026,34 +859,12 @@ def move_task_to_board(config: Dict[str, Any], task_id: str, board_id: str) -> O
 
             payload["board_id"] = str(board.get("board_id", board_id))
             payload["board_title"] = cleaned_board_title
-
-            if str(payload.get("source_kind", "")) == "markdown" and task_file.exists():
-                task_id_map = move_markdown_task_to_board(task_file, old_task_id, cleaned_board_title)
-                new_task_id = task_id_map.get(old_task_id, old_task_id)
-                if new_task_id != old_task_id:
-                    payload["task_id"] = new_task_id
-                _sync_markdown_unlocked(store, config)
-                payload = next(
-                    (
-                        task_payload
-                        for task_payload in store.get("tasks", [])
-                        if isinstance(task_payload, dict) and str(task_payload.get("task_id", "")) == str(payload.get("task_id", ""))
-                    ),
-                    payload,
-                )
             if old_board_title != cleaned_board_title:
                 payload["updated_at"] = _now_iso()
             updated = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=False)
-
-    if updated and updated.source_kind == "markdown":
-        update_task_status(
-            Path(config["task_file"]),
-            updated.task_id,
-            _markdown_status_for_phase(updated.phase),
-        )
+    _mutate_store(config, mutate)
     return updated
 
 
@@ -1073,10 +884,7 @@ def delete_task(config: Dict[str, Any], task_id: str) -> Optional[StoredTask]:
             remaining_tasks.append(payload)
         store["tasks"] = remaining_tasks
 
-    _mutate_store(config, mutate, sync_markdown=False)
-
-    if deleted and deleted.source_kind == "markdown":
-        delete_markdown_task(Path(config["task_file"]), task_id)
+    _mutate_store(config, mutate)
     return deleted
 
 
@@ -1096,7 +904,7 @@ def update_task_fields(config: Dict[str, Any], task_id: str, **fields: Any) -> O
             updated = StoredTask.from_payload(payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
     return updated
 
 
@@ -1135,7 +943,7 @@ def append_task_agent_output(config: Dict[str, Any],
             updated = StoredTask.from_payload(task_payload)
             break
 
-    _mutate_store(config, mutate, sync_markdown=False)
+    _mutate_store(config, mutate)
     return updated
 
 
@@ -1174,14 +982,7 @@ def update_task_phase(config: Dict[str, Any],
         fields["last_summary"] = last_summary
     if last_error is not None:
         fields["last_error"] = last_error
-    updated = update_task_fields(config, task_id, **fields)
-    if updated and updated.source_kind == "markdown":
-        update_task_status(
-            Path(config["task_file"]),
-            task_id,
-            _markdown_status_for_phase(updated.phase),
-        )
-    return updated
+    return update_task_fields(config, task_id, **fields)
 
 
 def phase_labels(config: Dict[str, Any]) -> List[str]:

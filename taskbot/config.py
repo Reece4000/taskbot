@@ -93,6 +93,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "terminal_log": "_taskbot/control/terminal.log",
         "terminal_tail_lines": 250,
         "terminal_ansi": True,
+        "repo_run_command": [],
     },
     "verification": {
         "mode": "auto",

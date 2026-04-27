@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ from taskbot.config import (
     load_config,
     save_config_overrides,
 )
+from taskbot.git_integration import checkout_git_branch, inspect_git_branches
 from taskbot.store import (
     StoredTask,
     create_board,
@@ -329,6 +331,18 @@ def _resolved_verification_mode(config: Dict[str, Any]) -> str:
     return "commands" if has_commands else "manual"
 
 
+def _repo_run_command_parts(config: Dict[str, Any]) -> List[str]:
+    command = config.get("ui", {}).get("repo_run_command", [])
+    if not isinstance(command, list):
+        return []
+    return [str(part).strip() for part in command if str(part).strip()]
+
+
+def _repo_run_command_text(config: Dict[str, Any]) -> str:
+    parts = _repo_run_command_parts(config)
+    return shlex.join(parts) if parts else ""
+
+
 def _command_name(parts: List[str], index: int) -> str:
     token = Path(parts[0]).name if parts else "check"
     slug = re.sub(r"[^a-z0-9]+", "-", token.lower()).strip("-")
@@ -356,6 +370,57 @@ def _parse_verification_command_lines(raw_text: str) -> List[Dict[str, Any]]:
             }
         )
     return commands
+
+
+def _parse_repo_run_command(raw_text: str) -> List[str]:
+    line = raw_text.strip()
+    if not line:
+        return []
+    try:
+        return [part for part in shlex.split(line) if str(part).strip()]
+    except ValueError as exc:
+        raise ValueError("Invalid repo run command: {0}".format(exc)) from exc
+
+
+def _launch_terminal(repo_root: Path) -> tuple[bool, str]:
+    resolved_repo = repo_root.resolve()
+    command: Optional[List[str]] = None
+
+    if sys.platform == "darwin":
+        command = ["open", "-a", "Terminal", str(resolved_repo)]
+    elif sys.platform.startswith("win"):
+        command = ["cmd.exe", "/K", 'cd /d "{0}"'.format(str(resolved_repo))]
+    else:
+        for candidate in (
+            "xdg-terminal-exec",
+            "x-terminal-emulator",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "kitty",
+            "alacritty",
+            "wezterm",
+            "xterm",
+        ):
+            executable = shutil.which(candidate)
+            if executable:
+                command = [executable]
+                break
+
+    if not command:
+        return (False, "No supported terminal launcher was found on this platform.")
+
+    try:
+        subprocess.Popen(
+            command,
+            cwd=resolved_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return (False, str(exc))
+    return (True, "")
 
 
 def _repo_agents_path(repo_root: Path) -> Path:
@@ -1774,6 +1839,22 @@ def launch_ui(config: Dict[str, Any]) -> int:
             commands_caption.setWordWrap(True)
             settings_layout.addWidget(commands_caption)
 
+            repo_run_command_label = QLabel("Repo Run Command")
+            repo_run_command_label.setObjectName("FieldLabel")
+            settings_layout.addWidget(repo_run_command_label)
+
+            self.repo_run_command_input = QLineEdit()
+            self.repo_run_command_input.setPlaceholderText("Optional command to launch from the repo root")
+            self.repo_run_command_input.setText(_repo_run_command_text(active_config))
+            settings_layout.addWidget(self.repo_run_command_input)
+
+            repo_run_command_caption = QLabel(
+                "Optional repo-local command for the header Run Command button. It runs from the repo root."
+            )
+            repo_run_command_caption.setObjectName("SidebarCaption")
+            repo_run_command_caption.setWordWrap(True)
+            settings_layout.addWidget(repo_run_command_caption)
+
             self.git_enabled_checkbox = QCheckBox("Auto-commit and push after successful runs")
             self.git_enabled_checkbox.setChecked(bool(git_config.get("enabled", False)))
             settings_layout.addWidget(self.git_enabled_checkbox)
@@ -1839,6 +1920,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             implementer_reasoning_effort = str(self.implementer_reasoning_effort_dropdown.currentData() or "").strip()
             verification_mode = str(self.verification_mode_dropdown.currentData() or "manual").strip() or "manual"
             verification_commands = _parse_verification_command_lines(self.verification_commands_input.toPlainText())
+            repo_run_command = _parse_repo_run_command(self.repo_run_command_input.text())
             return {
                 "codex": {
                     "sandbox": self.sandbox_dropdown.currentText().strip(),
@@ -1857,6 +1939,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     "mode": verification_mode,
                     "instructions": self.verification_notes_input.toPlainText().strip(),
                     "commands": verification_commands,
+                },
+                "ui": {
+                    "repo_run_command": repo_run_command,
                 },
                 "git": {
                     "enabled": self.git_enabled_checkbox.isChecked(),
@@ -2335,6 +2420,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
             event.setDropAction(Qt.MoveAction)
             event.acceptProposedAction()
 
+    class PhaseColumnBody(QWidget):
+        def __init__(self, owner: Any) -> None:
+            super().__init__(owner)
+            self._owner = owner
+            self.setAcceptDrops(True)
+
+        def dragEnterEvent(self, event) -> None:
+            self._owner._handle_drag_enter(event)
+
+        def dragMoveEvent(self, event) -> None:
+            self._owner._handle_drag_move(event)
+
+        def dragLeaveEvent(self, event) -> None:
+            self._owner._handle_drag_leave(event)
+
+        def dropEvent(self, event) -> None:
+            self._owner._handle_drop(event)
+
     class PhaseColumn(QFrame):
         def __init__(self, phase: str) -> None:
             super().__init__()
@@ -2346,6 +2449,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.setAcceptDrops(True)
             self.setProperty("dragOver", False)
             self.setToolTip("Drop a card here to move it to {0}.".format(_phase_label(phase)))
+            self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(14, 14, 14, 14)
@@ -2367,11 +2471,21 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             layout.addLayout(header_row)
 
-            self.body_layout = QVBoxLayout()
+            self.cards_scroll = QScrollArea()
+            self.cards_scroll.setObjectName("PhaseBodyScroll")
+            self.cards_scroll.setWidgetResizable(True)
+            self.cards_scroll.setFrameShape(QFrame.NoFrame)
+            self.cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.cards_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.cards_scroll.viewport().setObjectName("PhaseBodyViewport")
+
+            self.body_widget = PhaseColumnBody(self)
+            self.body_widget.setObjectName("PhaseBody")
+            self.body_layout = QVBoxLayout(self.body_widget)
             self.body_layout.setContentsMargins(0, 0, 0, 0)
             self.body_layout.setSpacing(10)
-            layout.addLayout(self.body_layout)
-            layout.addStretch(1)
+            self.cards_scroll.setWidget(self.body_widget)
+            layout.addWidget(self.cards_scroll, 1)
 
         def set_tasks(self,
                       tasks: List[StoredTask],
@@ -2395,7 +2509,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 empty.setWordWrap(True)
                 empty.setAlignment(Qt.AlignCenter)
                 empty.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                self.body_layout.addStretch(1)
                 self.body_layout.addWidget(empty)
+                self.body_layout.addStretch(1)
                 return
 
             for task in tasks:
@@ -2412,6 +2528,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.body_layout.addStretch(1)
 
+        def scroll_value(self) -> int:
+            return self.cards_scroll.verticalScrollBar().value()
+
+        def restore_scroll_value(self, value: int) -> None:
+            scrollbar = self.cards_scroll.verticalScrollBar()
+            scrollbar.setValue(min(value, scrollbar.maximum()))
+
         def _accepts_task_drop(self, event: Any) -> bool:
             if self._on_move_task is None:
                 return False
@@ -2422,25 +2545,25 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return False
             return True
 
-        def dragEnterEvent(self, event) -> None:
+        def _handle_drag_enter(self, event) -> None:
             if self._accepts_task_drop(event):
                 _set_drag_highlight(self, True)
                 event.acceptProposedAction()
                 return
             event.ignore()
 
-        def dragMoveEvent(self, event) -> None:
+        def _handle_drag_move(self, event) -> None:
             if self._accepts_task_drop(event):
                 _set_drag_highlight(self, True)
                 event.acceptProposedAction()
                 return
             event.ignore()
 
-        def dragLeaveEvent(self, event) -> None:
+        def _handle_drag_leave(self, event) -> None:
             _set_drag_highlight(self, False)
-            super().dragLeaveEvent(event)
+            event.accept()
 
-        def dropEvent(self, event) -> None:
+        def _handle_drop(self, event) -> None:
             _set_drag_highlight(self, False)
             if not self._accepts_task_drop(event):
                 event.ignore()
@@ -2449,6 +2572,18 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._on_move_task(task_id, self.phase)
             event.setDropAction(Qt.MoveAction)
             event.acceptProposedAction()
+
+        def dragEnterEvent(self, event) -> None:
+            self._handle_drag_enter(event)
+
+        def dragMoveEvent(self, event) -> None:
+            self._handle_drag_move(event)
+
+        def dragLeaveEvent(self, event) -> None:
+            self._handle_drag_leave(event)
+
+        def dropEvent(self, event) -> None:
+            self._handle_drop(event)
 
     class TaskbotWindow(QMainWindow):
         def __init__(self) -> None:
@@ -2465,6 +2600,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._handled_approval_request_ids: set[str] = set()
             self._last_rendered_selected_board_id: str | None | object = object()
             self._last_rendered_board_search_query: str | object = object()
+            self._git_repo_available = False
+            self._git_branch_reason = ""
+            self._current_git_branch = ""
             self._open_dialogs: List[QDialog] = []
             self.active_config = self._initial_config()
             self.selected_board_id = self._initial_board_id()
@@ -2587,6 +2725,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
             agents_button = QPushButton("Agents")
             agents_button.clicked.connect(self._open_agents_dialog)
             repo_row.addWidget(agents_button)
+
+            branch_label = QLabel("Branch")
+            branch_label.setObjectName("TopFieldLabel")
+            repo_row.addWidget(branch_label)
+
+            self.branch_dropdown = _FormDropdown()
+            self.branch_dropdown.setObjectName("HeaderBranchDropdown")
+            self.branch_dropdown.setMinimumWidth(160)
+            self.branch_dropdown.currentIndexChanged.connect(self._on_branch_selection_changed)
+            repo_row.addWidget(self.branch_dropdown)
+
+            self.open_terminal_button = QPushButton("Open Terminal")
+            self.open_terminal_button.clicked.connect(self._open_repo_terminal)
+            repo_row.addWidget(self.open_terminal_button)
+
+            self.run_repo_command_button = QPushButton("Run Command")
+            self.run_repo_command_button.clicked.connect(self._run_repo_command)
+            repo_row.addWidget(self.run_repo_command_button)
 
             controls_panel = QWidget()
             controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -2729,7 +2885,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.columns_scroll.setObjectName("ColumnsScroll")
             self.columns_scroll.setWidgetResizable(True)
             self.columns_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            self.columns_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.columns_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.columns_scroll.viewport().setObjectName("ColumnsViewport")
 
             self.columns_container = QWidget()
@@ -2925,7 +3081,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QPlainTextEdit,
             QListWidget,
             QSpinBox,
-            QDialog#AppDialog QToolButton#DialogDropdown {
+            QDialog#AppDialog QToolButton#DialogDropdown,
+            QToolButton#HeaderBranchDropdown {
                 background: #fffdf9;
                 color: #221a16;
                 border: 1px solid #d8cab9;
@@ -2937,7 +3094,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QPlainTextEdit:focus,
             QListWidget:focus,
             QSpinBox:focus,
-            QDialog#AppDialog QToolButton#DialogDropdown:focus {
+            QDialog#AppDialog QToolButton#DialogDropdown:focus,
+            QToolButton#HeaderBranchDropdown:focus {
                 border: 1px solid #c8643b;
             }
 
@@ -3150,6 +3308,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 border-radius: 3px;
                 padding: 2px 6px;
                 font-weight: 700;
+            }
+
+            QScrollArea#PhaseBodyScroll {
+                background: transparent;
+                border: none;
+            }
+
+            QWidget#PhaseBodyViewport,
+            QWidget#PhaseBody {
+                background: transparent;
             }
 
             QFrame#TaskCard {
@@ -3430,6 +3598,50 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def _refresh_repo_widgets(self) -> None:
             self.repo_input.setText(str(self.active_config["repo_root"]))
+            self._refresh_branch_dropdown()
+            self._refresh_repo_action_buttons()
+
+        def _runner_active(self) -> bool:
+            return self._runtime_path().exists()
+
+        def _refresh_branch_dropdown(self) -> None:
+            repo_root = Path(self.active_config["repo_root"])
+            branch_state = inspect_git_branches(repo_root)
+            self._git_repo_available = branch_state.repo_available
+            self._git_branch_reason = branch_state.reason
+            self._current_git_branch = branch_state.current_branch
+
+            self.branch_dropdown.blockSignals(True)
+            self.branch_dropdown.clear()
+
+            if branch_state.repo_available:
+                if branch_state.current_branch:
+                    for branch_name in branch_state.branches:
+                        self.branch_dropdown.addItem(branch_name, branch_name)
+                    if branch_state.branches:
+                        self.branch_dropdown.setCurrentData(branch_state.current_branch)
+                else:
+                    self.branch_dropdown.addItem("Detached HEAD", "")
+                    for branch_name in branch_state.branches:
+                        self.branch_dropdown.addItem(branch_name, branch_name)
+                    self.branch_dropdown.setCurrentIndex(0)
+            else:
+                self.branch_dropdown.addItem("No git repo", "")
+
+            self.branch_dropdown.blockSignals(False)
+            self.branch_dropdown.setEnabled(branch_state.repo_available and not self._runner_active())
+            self.branch_dropdown.setToolTip(branch_state.reason or branch_state.current_branch or "Git branch selector")
+
+        def _refresh_repo_action_buttons(self) -> None:
+            repo_root = Path(self.active_config["repo_root"])
+            run_command = _repo_run_command_parts(self.active_config)
+            runner_active = self._runner_active()
+            self.open_terminal_button.setEnabled(repo_root.exists() and repo_root.is_dir())
+            self.run_repo_command_button.setVisible(bool(run_command))
+            self.run_repo_command_button.setEnabled(bool(run_command) and not runner_active)
+            self.run_repo_command_button.setToolTip(
+                shlex.join(run_command) if run_command else "Configure a repo run command in Settings"
+            )
 
         def _invalidate_refresh_cache(self) -> None:
             self._store_signature = None
@@ -3481,8 +3693,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
             vertical_scrollbar.setValue(min(vertical_value, vertical_scrollbar.maximum()))
             horizontal_scrollbar.setValue(min(horizontal_value, horizontal_scrollbar.maximum()))
 
-        def _restore_columns_scroll_state(self, vertical_value: int, horizontal_value: int) -> None:
-            self._restore_scroll_state(self.columns_scroll, vertical_value, horizontal_value)
+        def _capture_phase_column_scroll_state(self) -> Dict[str, int]:
+            return {
+                phase: column.scroll_value()
+                for phase, column in self.phase_columns.items()
+            }
+
+        def _restore_phase_column_scroll_state(self, scroll_values: Dict[str, int]) -> None:
+            for phase, value in scroll_values.items():
+                column = self.phase_columns.get(phase)
+                if column is not None:
+                    column.restore_scroll_value(value)
+
+        def _restore_columns_scroll_state(self,
+                                          horizontal_value: int,
+                                          column_scroll_values: Dict[str, int]) -> None:
+            horizontal_scrollbar = self.columns_scroll.horizontalScrollBar()
+            horizontal_scrollbar.setValue(min(horizontal_value, horizontal_scrollbar.maximum()))
+            self._restore_phase_column_scroll_state(column_scroll_values)
             self._sync_stage_scrollbar()
 
         def _rebuild_phase_columns(self, phases: List[str]) -> None:
@@ -3723,6 +3951,79 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._invalidate_refresh_cache()
             self._refresh_repo_widgets()
             _save_session(repo_root, self.selected_board_id)
+            self.refresh_view()
+
+        def _on_branch_selection_changed(self, _index: int) -> None:
+            target_branch = str(self.branch_dropdown.currentData() or "").strip()
+            if not target_branch or target_branch == self._current_git_branch:
+                return
+            if self._runner_active():
+                QMessageBox.warning(
+                    self,
+                    "Runner Active",
+                    "Branch changes are blocked while a Taskbot runner is active.",
+                )
+                self._refresh_branch_dropdown()
+                return
+
+            repo_root = Path(self.active_config["repo_root"])
+            checkout_result = checkout_git_branch(repo_root, target_branch)
+            if not checkout_result.ok:
+                QMessageBox.critical(self, "Failed To Switch Branch", checkout_result.reason)
+                self._refresh_branch_dropdown()
+                return
+
+            self._dismiss_open_dialogs()
+            self.active_config = _runtime_config_for_repo(repo_root)
+            new_phase_order = phase_labels(self.active_config)
+            if new_phase_order != self.phase_order:
+                self._rebuild_phase_columns(new_phase_order)
+
+            self.selected_board_id = None
+            self._reset_board_search()
+            self.status_note = "Switched to branch {0}".format(checkout_result.branch)
+            self._invalidate_refresh_cache()
+            self._refresh_repo_widgets()
+            _save_session(repo_root, self.selected_board_id)
+            self.refresh_view()
+
+        def _open_repo_terminal(self) -> None:
+            ok, error_text = _launch_terminal(Path(self.active_config["repo_root"]))
+            if not ok:
+                QMessageBox.critical(self, "Failed To Open Terminal", error_text)
+                return
+            self.status_note = "Opened terminal for {0}".format(Path(self.active_config["repo_root"]).name)
+            self.refresh_view()
+
+        def _run_repo_command(self) -> None:
+            command = _repo_run_command_parts(self.active_config)
+            if not command:
+                QMessageBox.warning(
+                    self,
+                    "Run Command Not Configured",
+                    "Configure ui.repo_run_command in Settings before using this action.",
+                )
+                return
+            if self._runner_active():
+                QMessageBox.warning(
+                    self,
+                    "Runner Active",
+                    "Repo run commands are blocked while a Taskbot runner is active.",
+                )
+                return
+            try:
+                subprocess.Popen(
+                    command,
+                    cwd=self.active_config["repo_root"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Run Command", str(exc))
+                return
+
+            self.status_note = "Started repo command: {0}".format(Path(command[0]).name or command[0])
             self.refresh_view()
 
         def _show_modeless_dialog(self, dialog: QDialog, on_accepted: Any) -> None:
@@ -4223,7 +4524,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 )
 
         def _refresh_columns(self, tasks: List[StoredTask]) -> None:
-            vertical_value, horizontal_value = self._capture_scroll_state(self.columns_scroll)
+            horizontal_value = self.columns_scroll.horizontalScrollBar().value()
+            column_scroll_values = self._capture_phase_column_scroll_state()
             visible_tasks = self._visible_board_tasks(tasks)
 
             for phase in self.phase_order:
@@ -4239,8 +4541,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QTimer.singleShot(
                 0,
                 lambda: self._restore_columns_scroll_state(
-                    vertical_value,
                     horizontal_value,
+                    column_scroll_values,
                 ),
             )
 
@@ -4290,6 +4592,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def refresh_view(self) -> None:
             store_changed = self._refresh_store_cache()
             self._refresh_runtime_cache()
+            self._refresh_repo_action_buttons()
+            self.branch_dropdown.setEnabled(self._git_repo_available and not self._runner_active())
 
             boards = self._cached_boards
             tasks = self._cached_tasks

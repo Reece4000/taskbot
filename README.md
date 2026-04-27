@@ -95,6 +95,9 @@ Notes:
 The desktop UI provides:
 
 - a repository selector across the top
+- a repo-header branch selector for switching local git branches without leaving the UI
+- an `Open Terminal` button that launches a terminal in the active repo root when the platform supports it
+- an optional `Run Command` button driven by `ui.repo_run_command`, which runs the configured argv from the repo root
 - a left-side board list with quick board creation
 - centered workflow columns in the middle, with drag-and-drop cards that can move back to backlog or forward into later stages
 - a compact add-task button that opens a non-blocking dialog
@@ -136,11 +139,18 @@ Terminal color output is controlled by `codex.stream_ansi` in taskbot config:
 Git publishing is repo-local and disabled by default.
 
 - Enable it under `git.enabled` in `taskbot.config.json` or `<repo>/_taskbot/config.json`.
+- The desktop UI branch selector works independently of `git.enabled`, because that flag only controls post-run publishing.
+- Branch switching only lists local branches and is disabled while a Taskbot runner is active.
 - Taskbot only attempts git publishing after a successful implementation pass. Planning-only runs do not commit.
 - By default, `git.require_clean_worktree = true` skips publishing if the session started with existing publishable changes or any staged changes.
 - Taskbot excludes its own runtime files such as `_taskbot/artifacts`, `_taskbot/state`, `_taskbot/control`, and the task store from auto-commits.
 - Pushes use the current branch upstream when available. If there is no upstream, taskbot uses `git.remote` when set, or the single configured remote when there is exactly one.
 - Session artifacts include `_taskbot/artifacts/.../git.result.json` plus per-command stdout/stderr logs under the run's `git/` subdirectory.
+
+Repo-local header actions are also configured in the repo config:
+
+- `ui.repo_run_command` accepts an argv array such as `["npm", "run", "dev"]`. The UI Settings dialog lets you enter it as one shell-style command line and stores the parsed argv in config.
+- `Open Terminal` is best-effort and uses the local platform terminal launcher from the active repo root.
 
 ## Notes
 

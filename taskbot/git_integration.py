@@ -57,6 +57,21 @@ class GitPublishResult:
         }
 
 
+@dataclass
+class GitBranchState:
+    repo_available: bool
+    current_branch: str
+    branches: List[str]
+    reason: str
+
+
+@dataclass
+class GitBranchCheckoutResult:
+    ok: bool
+    branch: str
+    reason: str
+
+
 def _git_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     settings = config.get("git", {})
     return settings if isinstance(settings, dict) else {}
@@ -240,6 +255,72 @@ def _first_error(results: List[GitCommandResult], fallback: str) -> str:
         if stdout:
             return stdout
     return fallback
+
+
+def _git_repo_available(repo_root: Path) -> bool:
+    repo_check = _run_git_capture(repo_root, ["rev-parse", "--is-inside-work-tree"])
+    return repo_check.exit_code == 0 and repo_check.stdout.strip() == "true"
+
+
+def inspect_git_branches(repo_root: Path) -> GitBranchState:
+    if not _git_repo_available(repo_root):
+        return GitBranchState(
+            repo_available=False,
+            current_branch="",
+            branches=[],
+            reason="repository is not a git worktree",
+        )
+
+    current_result = _run_git_capture(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    branches_result = _run_git_capture(repo_root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+
+    if branches_result.exit_code != 0:
+        return GitBranchState(
+            repo_available=True,
+            current_branch="",
+            branches=[],
+            reason=_first_error([branches_result], "failed to list git branches"),
+        )
+
+    current_branch = current_result.stdout.strip() if current_result.exit_code == 0 else ""
+    branches = _split_lines(branches_result.stdout)
+    reason = ""
+    if current_result.exit_code != 0:
+        reason = _first_error(
+            [current_result],
+            "git branch controls require a checked-out branch or a local branch selection",
+        )
+    return GitBranchState(
+        repo_available=True,
+        current_branch=current_branch,
+        branches=branches,
+        reason=reason,
+    )
+
+
+def checkout_git_branch(repo_root: Path, branch: str) -> GitBranchCheckoutResult:
+    target_branch = str(branch).strip()
+    if not target_branch:
+        return GitBranchCheckoutResult(ok=False, branch="", reason="select a git branch first")
+
+    if not _git_repo_available(repo_root):
+        return GitBranchCheckoutResult(ok=False, branch="", reason="repository is not a git worktree")
+
+    checkout_result = _run_git_capture(repo_root, ["checkout", target_branch])
+    if checkout_result.exit_code != 0:
+        return GitBranchCheckoutResult(
+            ok=False,
+            branch=target_branch,
+            reason=_first_error([checkout_result], "git checkout failed"),
+        )
+
+    current_result = _run_git_capture(repo_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    current_branch = current_result.stdout.strip() if current_result.exit_code == 0 else target_branch
+    return GitBranchCheckoutResult(
+        ok=True,
+        branch=current_branch,
+        reason="checked out {0}".format(current_branch),
+    )
 
 
 def _select_push_command(repo_root: Path,

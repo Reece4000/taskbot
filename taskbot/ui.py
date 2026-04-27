@@ -828,8 +828,9 @@ def _create_form_dropdown_class(*,
             self.setToolButtonStyle(Qt.ToolButtonTextOnly)
             self.setFocusPolicy(Qt.StrongFocus)
             self.setCursor(Qt.PointingHandCursor)
-            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             self.setMinimumHeight(32)
+            self.setMinimumWidth(0)
             self._menu = QMenu(self)
             self._menu.setObjectName("DialogDropdownMenu")
             self.setMenu(self._menu)
@@ -838,8 +839,17 @@ def _create_form_dropdown_class(*,
 
         def _sync_display(self) -> None:
             current_text = self.currentText()
-            self.setText(current_text)
             self.setToolTip(current_text)
+            available_width = self.contentsRect().width() - 30
+            if available_width <= 0:
+                self.setText(current_text)
+                return
+            elided = self.fontMetrics().elidedText(current_text, Qt.ElideRight, available_width)
+            self.setText(elided)
+
+        def resizeEvent(self, event: Any) -> None:
+            super().resizeEvent(event)
+            self._sync_display()
 
         def _select_index(self, index: int) -> None:
             previous_index = self._current_index
@@ -1059,7 +1069,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
     try:
         from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData, QRect, Signal
-        from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette
+        from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette, QTextOption
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -1655,8 +1665,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.output_viewer = QPlainTextEdit()
                 self.output_viewer.setReadOnly(True)
                 self.output_viewer.setMinimumHeight(160)
-                self.output_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                self.output_viewer.setLineWrapMode(QPlainTextEdit.NoWrap)
+                self.output_viewer.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+                self.output_viewer.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+                self.output_viewer.setWordWrapMode(QTextOption.WrapAnywhere)
                 form_layout.addWidget(self.output_viewer, 1)
                 self._refresh_output_viewer()
             else:

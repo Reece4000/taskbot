@@ -52,6 +52,7 @@ from taskbot.ui import (
     _start_task_run_args,
     _start_loop_run_args,
     _task_card_can_start_task,
+    _task_move_targets,
     _terminal_text_should_refresh,
     _taskbot_title_html,
     launch_ui,
@@ -293,6 +294,12 @@ class TaskbotBehaviourTests(unittest.TestCase):
     def test_board_header_title_appends_total_task_count(self) -> None:
         self.assertEqual(_board_header_title("UX", 3), "UX (3 tasks)")
         self.assertEqual(_board_header_title("All Boards", 12), "All Boards (12 tasks)")
+
+    def test_task_move_targets_excludes_current_phase_and_keeps_board_order(self) -> None:
+        self.assertEqual(
+            _task_move_targets("in_progress", ["backlog", "planning", "in_progress", "completed"]),
+            ["backlog", "planning", "completed"],
+        )
 
     def test_rename_store_board_keeps_empty_board_identity_stable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

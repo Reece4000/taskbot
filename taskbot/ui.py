@@ -802,6 +802,10 @@ def _task_card_can_start_task(phase: str) -> bool:
     return phase in {"backlog", "planning"}
 
 
+def _task_move_targets(current_phase: str, phase_order: List[str]) -> List[str]:
+    return [phase for phase in phase_order if phase != current_phase]
+
+
 def _create_form_dropdown_class(*,
                                 Qt: Any,
                                 QAction: Any,
@@ -2110,6 +2114,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def __init__(self,
                      task: StoredTask,
                      *,
+                     phase_order: List[str],
                      on_start_task: Any = None,
                      on_edit: Any,
                      on_delete: Any,
@@ -2119,6 +2124,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._task_id = task.task_id
             self._task_board_id = task.board_id
             self._task_phase = task.phase
+            self._move_targets = _task_move_targets(task.phase, phase_order)
             self._on_start_task = on_start_task
             self._on_edit = on_edit
             self._on_delete = on_delete
@@ -2197,6 +2203,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if _task_card_can_start_task(self._task_phase):
                 start_action = menu.addAction("Start Task")
             edit_action = menu.addAction("Edit Card")
+            move_menu = None
+            if self._on_move_task is not None and self._move_targets:
+                move_menu = menu.addMenu("Move to")
+                for phase in self._move_targets:
+                    action = move_menu.addAction(_phase_label(phase))
+                    action.setData(phase)
             archive_action = menu.addAction("Archive Card")
             delete_action = menu.addAction("Delete Card")
 
@@ -2210,6 +2222,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self._start_task()
             elif action == edit_action:
                 self._on_edit()
+            elif move_menu is not None and action in move_menu.actions():
+                target_phase = str(action.data() or "").strip()
+                if target_phase:
+                    self._on_move_task(self._task_id, target_phase)
             elif action == archive_action and archive_action.isEnabled():
                 self._archive_task()
             elif action == delete_action:
@@ -2521,6 +2537,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def set_tasks(self,
                       tasks: List[StoredTask],
                       *,
+                      phase_order: List[str],
                       on_start_task: Any,
                       on_edit_task: Any,
                       on_delete_task: Any,
@@ -2549,6 +2566,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.body_layout.addWidget(
                     TaskCard(
                         task,
+                        phase_order=phase_order,
                         on_start_task=on_start_task,
                         on_edit=lambda _checked=False, current_task=task: on_edit_task(current_task),
                         on_delete=lambda _checked=False, current_task=task: on_delete_task(current_task),
@@ -4574,6 +4592,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 phase_tasks = [task for task in visible_tasks if task.phase == phase]
                 self.phase_columns[phase].set_tasks(
                     phase_tasks,
+                    phase_order=self.phase_order,
                     on_start_task=self._start_task,
                     on_edit_task=self._open_edit_task_dialog,
                     on_delete_task=self._delete_task,

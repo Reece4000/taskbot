@@ -2935,6 +2935,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.branch_dropdown = _FormDropdown()
             self.branch_dropdown.setObjectName("HeaderBranchDropdown")
             self.branch_dropdown.setMinimumWidth(160)
+            self.branch_dropdown.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             self.branch_dropdown.setForegroundPopup(True)
             self.branch_dropdown.currentIndexChanged.connect(self._on_branch_selection_changed)
             repo_row.addWidget(self.branch_dropdown)

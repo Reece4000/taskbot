@@ -2763,11 +2763,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             settings_button.clicked.connect(self._open_settings_dialog)
             repo_row.addWidget(settings_button)
 
-            agents_button = QPushButton("Agents")
+            agents_button = QPushButton("Agents.md")
             agents_button.clicked.connect(self._open_agents_dialog)
             repo_row.addWidget(agents_button)
 
             self.open_terminal_button = QPushButton("Open Terminal")
+            self.open_terminal_button.setObjectName("HeaderOpenTerminalButton")
             self.open_terminal_button.clicked.connect(self._open_repo_terminal)
             repo_row.addWidget(self.open_terminal_button)
 
@@ -3207,6 +3208,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             QPushButton#HeaderStopButton:hover {
                 background: #832929;
+            }
+
+            QPushButton#HeaderOpenTerminalButton {
+                background: #111111;
+                color: #ffffff;
+                border: 1px solid #000000;
+            }
+
+            QPushButton#HeaderOpenTerminalButton:hover {
+                background: #222222;
             }
 
             QToolButton#SmallActionButton {

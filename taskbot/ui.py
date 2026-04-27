@@ -1508,7 +1508,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.setObjectName("AppDialog")
             self.setWindowTitle("Edit Task")
             self.setModal(False)
-            self.resize(640, 680)
+            self.setSizeGripEnabled(True)
             self._agent_output_entries = _task_agent_output_entries(task)
 
             available_boards = list(board_titles)
@@ -1533,68 +1533,86 @@ def launch_ui(config: Dict[str, Any]) -> int:
             caption.setWordWrap(True)
             layout.addWidget(caption)
 
+            form_scroll = QScrollArea()
+            form_scroll.setObjectName("SettingsScrollArea")
+            form_scroll.setWidgetResizable(True)
+            form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            form_scroll.setFrameShape(QFrame.NoFrame)
+            layout.addWidget(form_scroll, 1)
+
+            form_content = QWidget()
+            form_content.setObjectName("SettingsContent")
+            form_layout = QVBoxLayout(form_content)
+            form_layout.setContentsMargins(0, 0, 0, 0)
+            form_layout.setSpacing(10)
+
             board_label = QLabel("Board")
             board_label.setObjectName("FieldLabel")
-            layout.addWidget(board_label)
+            form_layout.addWidget(board_label)
 
             self.board_dropdown = _FormDropdown()
             self.board_dropdown.addItems(available_boards)
             self.board_dropdown.setCurrentText(task.board_title)
             if self._new_board_callback is not None:
                 self.board_dropdown.addCustomAction("New board...", self._create_new_board)
-            layout.addWidget(self.board_dropdown)
+            form_layout.addWidget(self.board_dropdown)
 
             phase_label = QLabel("Phase")
             phase_label.setObjectName("FieldLabel")
-            layout.addWidget(phase_label)
+            form_layout.addWidget(phase_label)
 
             self.phase_dropdown = _FormDropdown()
             for phase in phases:
                 self.phase_dropdown.addItem(PHASE_TITLES.get(phase, phase), phase)
             self.phase_dropdown.setCurrentData(task.phase)
-            layout.addWidget(self.phase_dropdown)
+            form_layout.addWidget(self.phase_dropdown)
 
             task_label = QLabel("Title")
             task_label.setObjectName("FieldLabel")
-            layout.addWidget(task_label)
+            form_layout.addWidget(task_label)
 
             self.title_input = QLineEdit()
             self.title_input.setPlaceholderText("What needs to be done?")
             self.title_input.setText(task.title)
             self.title_input.returnPressed.connect(self.accept)
-            layout.addWidget(self.title_input)
+            form_layout.addWidget(self.title_input)
 
             context_label = QLabel("Context")
             context_label.setObjectName("FieldLabel")
-            layout.addWidget(context_label)
+            form_layout.addWidget(context_label)
 
             self.context_input = QPlainTextEdit()
             self.context_input.setPlaceholderText("Optional notes or constraints.")
-            self.context_input.setFixedHeight(112)
+            self.context_input.setFixedHeight(96)
             self.context_input.setPlainText(task.context_notes)
-            layout.addWidget(self.context_input)
+            form_layout.addWidget(self.context_input)
 
             outputs_label = QLabel("Agent Output")
             outputs_label.setObjectName("FieldLabel")
-            layout.addWidget(outputs_label)
+            form_layout.addWidget(outputs_label)
 
             if self._agent_output_entries:
                 self.output_selector = _FormDropdown()
                 for entry in self._agent_output_entries:
                     self.output_selector.addItem(str(entry.get("label", "")), str(entry.get("output_id", "")))
                 self.output_selector.currentIndexChanged.connect(self._refresh_output_viewer)
-                layout.addWidget(self.output_selector)
+                form_layout.addWidget(self.output_selector)
 
                 self.output_viewer = QPlainTextEdit()
                 self.output_viewer.setReadOnly(True)
-                self.output_viewer.setMinimumHeight(220)
-                layout.addWidget(self.output_viewer, 1)
+                self.output_viewer.setMinimumHeight(160)
+                self.output_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                self.output_viewer.setLineWrapMode(QPlainTextEdit.NoWrap)
+                form_layout.addWidget(self.output_viewer, 1)
                 self._refresh_output_viewer()
             else:
                 empty_outputs = QLabel("No saved agent output is available for this card yet.")
                 empty_outputs.setObjectName("SidebarCaption")
                 empty_outputs.setWordWrap(True)
-                layout.addWidget(empty_outputs)
+                form_layout.addWidget(empty_outputs)
+
+            form_scroll.setWidget(form_content)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
             buttons.setObjectName("DialogButtons")
@@ -1603,6 +1621,19 @@ def launch_ui(config: Dict[str, Any]) -> int:
             buttons.rejected.connect(self.reject)
             layout.addSpacing(8)
             layout.addWidget(buttons)
+
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                available_geometry = screen.availableGeometry()
+                if available_geometry.width() > 0 and available_geometry.height() > 0:
+                    max_width = max(1, available_geometry.width() - 48)
+                    max_height = max(1, available_geometry.height() - 48)
+                    self.setMaximumSize(max_width, max_height)
+                    self.resize(min(720, max_width), min(760, max_height))
+                else:
+                    self.resize(720, 760)
+            else:
+                self.resize(720, 760)
 
             self.title_input.selectAll()
             self.title_input.setFocus()

@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -213,6 +214,10 @@ def _path_signature(path: Path) -> tuple[bool, int, int]:
     except OSError:
         return (False, 0, 0)
     return (True, stat_result.st_mtime_ns, stat_result.st_size)
+
+
+def _now_timestamp_label() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
 def _approval_response_path(control_dir: str | Path, request_id: str) -> Path:
@@ -1000,7 +1005,13 @@ def _wrapped_plain_text_height(label: Any, width: int) -> int:
     return text_rect.height() + margins.top() + margins.bottom()
 
 
-def _sync_task_card_footer_heights(footer: Any, badge: Any, meta: Any, spacing: int) -> tuple[int, int]:
+def _sync_task_card_footer_heights(
+    footer: Any,
+    badge: Any,
+    meta: Any,
+    spacing: int,
+    actions: Any | None = None,
+) -> tuple[int, int]:
     margins = footer.contentsMargins()
     content_width = footer.contentsRect().width()
     if content_width <= 0:
@@ -1008,9 +1019,14 @@ def _sync_task_card_footer_heights(footer: Any, badge: Any, meta: Any, spacing: 
 
     badge_width = badge.width() if badge.width() > 0 else badge.sizeHint().width()
     badge_height = badge.height() if badge.height() > 0 else badge.sizeHint().height()
-    meta_width = max(1, content_width - badge_width - spacing)
+    actions_width = 0
+    actions_height = 0
+    if actions is not None and actions.isVisible():
+        actions_width = actions.width() if actions.width() > 0 else actions.sizeHint().width()
+        actions_height = actions.height() if actions.height() > 0 else actions.sizeHint().height()
+    meta_width = max(1, content_width - badge_width - spacing - actions_width - (spacing if actions_width else 0))
     meta_height = _wrapped_plain_text_height(meta, meta_width)
-    footer_height = max(badge_height, meta_height) + margins.top() + margins.bottom()
+    footer_height = max(badge_height, meta_height, actions_height) + margins.top() + margins.bottom()
 
     height_changed = False
     if meta.minimumHeight() != meta_height:
@@ -1235,9 +1251,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.updateGeometry()
 
     class _TaskCardFooter(QWidget):
-        def __init__(self, board_title: str, meta_text: str, parent: QWidget | None = None) -> None:
+        def __init__(
+            self,
+            board_title: str,
+            meta_text: str,
+            *,
+            actions_widget: QWidget | None = None,
+            parent: QWidget | None = None,
+        ) -> None:
             super().__init__(parent)
             self._spacing = 8
+            self._actions = actions_widget
 
             layout = QHBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -1257,10 +1281,20 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             layout.addWidget(self._meta, 1, Qt.AlignLeft | Qt.AlignTop)
 
+            if self._actions is not None:
+                self._actions.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                layout.addWidget(self._actions, 0, Qt.AlignRight | Qt.AlignTop)
+
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         def _sync_heights(self) -> None:
-            _sync_task_card_footer_heights(self, self._board_badge, self._meta, self._spacing)
+            _sync_task_card_footer_heights(
+                self,
+                self._board_badge,
+                self._meta,
+                self._spacing,
+                self._actions,
+            )
 
         def hasHeightForWidth(self) -> bool:
             return True
@@ -1269,9 +1303,18 @@ def launch_ui(config: Dict[str, Any]) -> int:
             margins = self.contentsMargins()
             available_width = max(1, width - margins.left() - margins.right())
             badge_hint = self._board_badge.sizeHint()
-            meta_width = max(1, available_width - badge_hint.width() - self._spacing)
+            actions_width = 0
+            actions_height = 0
+            if self._actions is not None and self._actions.isVisible():
+                actions_hint = self._actions.sizeHint()
+                actions_width = actions_hint.width()
+                actions_height = actions_hint.height()
+            meta_width = max(
+                1,
+                available_width - badge_hint.width() - self._spacing - actions_width - (self._spacing if actions_width else 0),
+            )
             meta_height = _wrapped_plain_text_height(self._meta, meta_width)
-            return max(badge_hint.height(), meta_height) + margins.top() + margins.bottom()
+            return max(badge_hint.height(), meta_height, actions_height) + margins.top() + margins.bottom()
 
         def sizeHint(self) -> QSize:
             hint = super().sizeHint()
@@ -1289,6 +1332,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             super().resizeEvent(event)
             if width_changed:
                 self._sync_heights()
+
+        def mousePressEvent(self, event) -> None:
+            event.ignore()
+
+        def mouseReleaseEvent(self, event) -> None:
+            event.ignore()
 
     def _set_primary_button_default(buttons: QDialogButtonBox, standard_button: Any) -> None:
         primary_button = buttons.button(standard_button)
@@ -1707,6 +1756,63 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.board_dropdown.addItem(created_board_title, created_board_title)
             self.board_dropdown.setCurrentText(created_board_title)
 
+    class TestingFeedbackDialog(CommandEnterDialog):
+        def __init__(self, task: StoredTask, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setObjectName("AppDialog")
+            self.setWindowTitle("Return Task To Backlog")
+            self.setModal(True)
+            self.resize(520, 280)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(10)
+
+            title = QLabel("What needs fixing?")
+            title.setObjectName("DialogTitle")
+            layout.addWidget(title)
+
+            caption = QLabel(
+                'Add testing feedback for "{0}". The task will move back to Backlog with these notes appended.'.format(
+                    task.title
+                )
+            )
+            caption.setObjectName("DialogCaption")
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
+
+            notes_label = QLabel("Testing feedback")
+            notes_label.setObjectName("FieldLabel")
+            layout.addWidget(notes_label)
+
+            self.notes_input = QPlainTextEdit()
+            self.notes_input.setPlaceholderText("Describe what failed, what is missing, or what should change.")
+            self.notes_input.setFixedHeight(132)
+            layout.addWidget(self.notes_input)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.setObjectName("DialogButtons")
+            submit_button = buttons.button(QDialogButtonBox.Ok)
+            if submit_button is not None:
+                submit_button.setText("Return to Backlog")
+            _set_primary_button_default(buttons, QDialogButtonBox.Ok)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            layout.addSpacing(8)
+            layout.addWidget(buttons)
+
+            self.notes_input.setFocus()
+
+        def accept(self) -> None:
+            if not self.feedback_notes():
+                QMessageBox.warning(self, "Testing Feedback Required", "Describe what needs fixing before sending the task back.")
+                self.notes_input.setFocus()
+                return
+            super().accept()
+
+        def feedback_notes(self) -> str:
+            return self.notes_input.toPlainText().strip()
+
     class SettingsDialog(CommandEnterDialog):
         def __init__(self, active_config: Dict[str, Any], parent: QWidget | None = None) -> None:
             super().__init__(parent)
@@ -2116,6 +2222,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                      *,
                      phase_order: List[str],
                      on_start_task: Any = None,
+                     on_approve_testing: Any = None,
+                     on_reject_testing: Any = None,
                      on_edit: Any,
                      on_delete: Any,
                      on_move_task: Any = None,
@@ -2169,8 +2277,30 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 relevant_files = task.plan.get("relevant_files", [])
             if isinstance(relevant_files, list) and relevant_files:
                 meta_parts.append("{0} files".format(len(relevant_files)))
-            footer = _TaskCardFooter(task.board_title, " | ".join(meta_parts))
-            footer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            footer_actions = None
+            if task.phase == "needs_testing" and (on_approve_testing is not None or on_reject_testing is not None):
+                footer_actions = QWidget(self)
+                footer_actions_layout = QHBoxLayout(footer_actions)
+                footer_actions_layout.setContentsMargins(0, 0, 0, 0)
+                footer_actions_layout.setSpacing(6)
+
+                if on_approve_testing is not None:
+                    approve_button = QToolButton(footer_actions)
+                    approve_button.setObjectName("CardApproveButton")
+                    approve_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
+                    approve_button.setToolTip("Approve testing and move this card to Completed.")
+                    approve_button.clicked.connect(lambda _checked=False, current_task=task: on_approve_testing(current_task))
+                    footer_actions_layout.addWidget(approve_button)
+
+                if on_reject_testing is not None:
+                    reject_button = QToolButton(footer_actions)
+                    reject_button.setObjectName("CardRejectButton")
+                    reject_button.setIcon(self.style().standardIcon(QStyle.SP_DialogCancelButton))
+                    reject_button.setToolTip("Return this card to Backlog with testing feedback.")
+                    reject_button.clicked.connect(lambda _checked=False, current_task=task: on_reject_testing(current_task))
+                    footer_actions_layout.addWidget(reject_button)
+
+            footer = _TaskCardFooter(task.board_title, " | ".join(meta_parts), actions_widget=footer_actions)
             layout.addWidget(footer)
 
             if task.last_error:
@@ -2539,6 +2669,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                       *,
                       phase_order: List[str],
                       on_start_task: Any,
+                      on_approve_testing: Any,
+                      on_reject_testing: Any,
                       on_edit_task: Any,
                       on_delete_task: Any,
                       on_move_task: Any,
@@ -2568,6 +2700,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                         task,
                         phase_order=phase_order,
                         on_start_task=on_start_task,
+                        on_approve_testing=on_approve_testing,
+                        on_reject_testing=on_reject_testing,
                         on_edit=lambda _checked=False, current_task=task: on_edit_task(current_task),
                         on_delete=lambda _checked=False, current_task=task: on_delete_task(current_task),
                         on_move_task=on_move_task,
@@ -3433,6 +3567,32 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QToolButton#CardCompleteButton:hover {
                 background: #d8ead9;
                 border: 1px solid #b8d2b8;
+            }
+
+            QToolButton#CardApproveButton {
+                background: #e5f2e5;
+                color: #2f6b44;
+                border: 1px solid #c8dec9;
+                border-radius: 10px;
+                padding: 3px;
+            }
+
+            QToolButton#CardApproveButton:hover {
+                background: #d8ead9;
+                border: 1px solid #b8d2b8;
+            }
+
+            QToolButton#CardRejectButton {
+                background: #f6dfdc;
+                color: #8f2f29;
+                border: 1px solid #ebc4bf;
+                border-radius: 10px;
+                padding: 3px;
+            }
+
+            QToolButton#CardRejectButton:hover {
+                background: #f1cfca;
+                border: 1px solid #dda8a1;
             }
 
             QToolButton#CardNeedsTestingButton {
@@ -4414,6 +4574,40 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def _needs_testing_task(self, task: StoredTask) -> None:
             self._move_task_to_phase(task, "needs_testing")
 
+        def _approve_needs_testing_task(self, task: StoredTask) -> None:
+            self._move_task_to_phase(task, "completed")
+
+        def _reject_needs_testing_task(self, task: StoredTask) -> None:
+            dialog = TestingFeedbackDialog(task, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+
+            failure_note = "Testing feedback ({0}):\n{1}".format(_now_timestamp_label(), dialog.feedback_notes())
+            existing_context = task.context_notes.strip()
+            updated_context = failure_note if not existing_context else "{0}\n\n{1}".format(existing_context, failure_note)
+
+            try:
+                updated = edit_task(
+                    self.active_config,
+                    task.task_id,
+                    board_title=task.board_title,
+                    title=task.title,
+                    context_notes=updated_context,
+                    phase="backlog",
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Update Task", str(exc))
+                return
+            if updated is None:
+                QMessageBox.critical(self, "Failed To Update Task", "Task could not be found.")
+                return
+
+            self.selected_board_id = updated.board_id
+            self.status_note = "Returned task {0} to Backlog with testing feedback".format(updated.task_id)
+            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._activate_repo_config(Path(self.active_config["repo_root"]))
+            self.refresh_view()
+
         def _move_task_to_board(self, task_id: str, board_id: str) -> None:
             current_task = next((task for task in self._cached_tasks if task.task_id == task_id), None)
             if current_task is not None and current_task.board_id == board_id:
@@ -4594,6 +4788,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     phase_tasks,
                     phase_order=self.phase_order,
                     on_start_task=self._start_task,
+                    on_approve_testing=self._approve_needs_testing_task,
+                    on_reject_testing=self._reject_needs_testing_task,
                     on_edit_task=self._open_edit_task_dialog,
                     on_delete_task=self._delete_task,
                     on_move_task=self._move_task_to_phase,

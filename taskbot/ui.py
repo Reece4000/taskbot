@@ -2274,6 +2274,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.setAttribute(Qt.WA_Hover, True)
             self.setAcceptDrops(True)
             self.setProperty("dragOver", False)
+            self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             self.setToolTip("Click to edit. Drag to move between columns.")
 
             layout = QVBoxLayout(self)
@@ -2285,6 +2286,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             title.setTextFormat(Qt.PlainText)
             title.setWordWrap(True)
             title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            title.setMinimumWidth(0)
             title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             layout.addWidget(title)
 
@@ -2295,6 +2297,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 context.setTextFormat(Qt.PlainText)
                 context.setWordWrap(True)
                 context.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                context.setMinimumWidth(0)
                 context.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 layout.addWidget(context)
 
@@ -2692,25 +2695,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             layout.addWidget(self.cards_scroll, 1)
 
         def _update_column_width(self) -> None:
-            layout = self.layout()
-            if layout is None:
-                return
-
-            content_width = 0
-            for index in range(self.body_layout.count()):
-                item = self.body_layout.itemAt(index)
-                widget = item.widget()
-                if widget is None:
-                    continue
-                content_width = max(content_width, widget.minimumSizeHint().width(), widget.sizeHint().width())
-
-            margins = layout.contentsMargins()
-            scrollbar_extent = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
-            required_width = max(
-                self._base_width,
-                content_width + margins.left() + margins.right() + scrollbar_extent + 6,
-            )
-            self.setFixedWidth(required_width)
+            self.setFixedWidth(self._base_width)
 
         def set_tasks(self,
                       tasks: List[StoredTask],

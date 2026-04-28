@@ -2648,8 +2648,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.phase = phase
             self._on_move_task: Any = None
             self.setObjectName("PhaseColumn")
-            self.setMinimumWidth(300)
-            self.setMaximumWidth(348)
+            self._base_width = 300
+            self.setMinimumWidth(self._base_width)
             self.setAcceptDrops(True)
             self.setProperty("dragOver", False)
             self.setToolTip("Drop a card here to move it to {0}.".format(_phase_label(phase)))
@@ -2691,6 +2691,27 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.cards_scroll.setWidget(self.body_widget)
             layout.addWidget(self.cards_scroll, 1)
 
+        def _update_column_width(self) -> None:
+            layout = self.layout()
+            if layout is None:
+                return
+
+            content_width = 0
+            for index in range(self.body_layout.count()):
+                item = self.body_layout.itemAt(index)
+                widget = item.widget()
+                if widget is None:
+                    continue
+                content_width = max(content_width, widget.minimumSizeHint().width(), widget.sizeHint().width())
+
+            margins = layout.contentsMargins()
+            scrollbar_extent = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+            required_width = max(
+                self._base_width,
+                content_width + margins.left() + margins.right() + scrollbar_extent + 6,
+            )
+            self.setFixedWidth(required_width)
+
         def set_tasks(self,
                       tasks: List[StoredTask],
                       *,
@@ -2719,6 +2740,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.body_layout.addStretch(1)
                 self.body_layout.addWidget(empty)
                 self.body_layout.addStretch(1)
+                self._update_column_width()
                 return
 
             for task in tasks:
@@ -2737,6 +2759,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 )
 
             self.body_layout.addStretch(1)
+            self._update_column_width()
 
         def scroll_value(self) -> int:
             return self.cards_scroll.verticalScrollBar().value()

@@ -1552,6 +1552,109 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def createHandle(self) -> QSplitterHandle:
             return _CenteredSplitterHandle(self.orientation(), self)
 
+    class _ThemeToggleButton(QPushButton):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__("", parent)
+            self.setCursor(Qt.PointingHandCursor)
+            self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        def sizeHint(self) -> QSize:
+            return QSize(56, 24)
+
+        def _draw_sun_icon(self, painter: QPainter, rect: QRect, color: QColor) -> None:
+            if not rect.isValid():
+                return
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            center = rect.center()
+            radius = max(3, min(rect.width(), rect.height()) // 5)
+            pen = color
+            pen.setAlpha(235)
+            painter.setPen(pen)
+            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0), (1, -1), (1, 1), (-1, 1), (-1, -1)):
+                painter.drawLine(
+                    center.x() + int(dx * (radius + 2)),
+                    center.y() + int(dy * (radius + 2)),
+                    center.x() + int(dx * (radius + 4)),
+                    center.y() + int(dy * (radius + 4)),
+                )
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(center, radius, radius)
+            painter.restore()
+
+        def _draw_moon_icon(
+            self,
+            painter: QPainter,
+            rect: QRect,
+            color: QColor,
+            mask_color: QColor,
+        ) -> None:
+            if not rect.isValid():
+                return
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            size = max(8, min(rect.width(), rect.height()) - 6)
+            x = rect.center().x() - size // 2
+            y = rect.center().y() - size // 2
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(x, y, size, size)
+            painter.setBrush(mask_color)
+            painter.drawEllipse(x + max(2, size // 4), y + 1, size, size)
+            painter.restore()
+
+        def paintEvent(self, event) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            theme = _active_theme(self)
+            checked = self.isChecked()
+            hovered = self.underMouse()
+            track_rect = self.rect().adjusted(0, 0, -1, -1)
+            track_radius = track_rect.height() / 2.0
+            track_fill = QColor(
+                theme["theme_toggle_checked_bg" if checked else "theme_toggle_hover" if hovered else "theme_toggle_bg"]
+            )
+            track_border = QColor(
+                theme["theme_toggle_checked_border" if checked else "theme_toggle_border"]
+            )
+            thumb_fill = QColor(theme["shell_bg" if checked else "input_bg"])
+            thumb_border = QColor(theme["theme_toggle_checked_border" if checked else "theme_toggle_border"])
+            active_icon = QColor(theme["main_window_fg" if checked else "primary_bg"])
+            inactive_icon = QColor(theme["theme_toggle_checked_fg" if checked else "theme_toggle_fg"])
+            inactive_icon.setAlpha(155)
+
+            painter.setPen(track_border)
+            painter.setBrush(track_fill)
+            painter.drawRoundedRect(track_rect, track_radius, track_radius)
+
+            thumb_size = track_rect.height() - 6
+            thumb_y = track_rect.y() + 3
+            thumb_x = track_rect.right() - thumb_size - 3 if checked else track_rect.x() + 3
+            thumb_rect = QRect(thumb_x, thumb_y, thumb_size, thumb_size)
+            painter.setPen(thumb_border)
+            painter.setBrush(thumb_fill)
+            painter.drawEllipse(thumb_rect)
+
+            icon_size = max(10, thumb_size - 6)
+            left_icon_rect = QRect(track_rect.x() + 6, track_rect.y() + 3, icon_size, icon_size)
+            right_icon_rect = QRect(track_rect.right() - icon_size - 6, track_rect.y() + 3, icon_size, icon_size)
+            self._draw_sun_icon(painter, thumb_rect if not checked else left_icon_rect, active_icon if not checked else inactive_icon)
+            self._draw_moon_icon(
+                painter,
+                thumb_rect if checked else right_icon_rect,
+                active_icon if checked else inactive_icon,
+                thumb_fill if checked else track_fill,
+            )
+
+            if self.hasFocus():
+                focus_pen = QColor(theme["input_focus"])
+                focus_pen.setAlpha(180)
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(focus_pen)
+                painter.drawRoundedRect(track_rect.adjusted(1, 1, -1, -1), track_radius - 1, track_radius - 1)
+
     class _WrappingPlainTextLabel(QLabel):
         def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
             super().__init__(text, parent)
@@ -3219,7 +3322,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.status_chip.setObjectName("StatusChip")
             title_row.addWidget(self.status_chip, 0, Qt.AlignTop)
 
-            self.theme_toggle = QPushButton("Dark")
+            self.theme_toggle = _ThemeToggleButton()
             self.theme_toggle.setObjectName("ThemeToggleButton")
             self.theme_toggle.setCheckable(True)
             self.theme_toggle.setChecked(self.current_theme == "dark")
@@ -3600,24 +3703,27 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QPushButton#ThemeToggleButton {
-                background: __THEME_TOGGLE_BG__;
-                color: __THEME_TOGGLE_FG__;
-                border: 1px solid __THEME_TOGGLE_BORDER__;
-                border-radius: 11px;
-                padding: 4px 10px;
-                min-height: 22px;
-                font-size: 11px;
-                font-weight: 700;
+                background: transparent;
+                color: transparent;
+                border: none;
+                padding: 0;
+                min-width: 56px;
+                max-width: 56px;
+                min-height: 24px;
+                max-height: 24px;
             }
 
             QPushButton#ThemeToggleButton:hover {
-                background: __THEME_TOGGLE_HOVER__;
+                background: transparent;
             }
 
             QPushButton#ThemeToggleButton:checked {
-                background: __THEME_TOGGLE_CHECKED_BG__;
-                color: __THEME_TOGGLE_CHECKED_FG__;
-                border: 1px solid __THEME_TOGGLE_CHECKED_BORDER__;
+                background: transparent;
+                color: transparent;
+            }
+
+            QPushButton#ThemeToggleButton:focus {
+                outline: none;
             }
 
             QLabel#TopFieldLabel {

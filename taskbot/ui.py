@@ -99,6 +99,289 @@ ANSI_FG_COLORS = {
     96: "#7cdce8",
     97: "#f3f7fb",
 }
+UI_THEME_NAMES = ("light", "dark")
+UI_LIGHT_THEME: Dict[str, str] = {
+    "main_window_bg": "#efe7dc",
+    "main_window_fg": "#261d18",
+    "shell_bg": "#fbf8f3",
+    "shell_border": "#ddcfbf",
+    "board_divider": "rgba(77, 62, 51, 0.10)",
+    "sidebar_bg": "#f5efe5",
+    "sidebar_border": "#ddd0bf",
+    "header_divider": "rgba(77, 62, 51, 0.12)",
+    "headline": "#1f1814",
+    "status_bg": "#f5ddcf",
+    "status_fg": "#8d4728",
+    "top_field_label": "#765d4f",
+    "field_label": "#6b584c",
+    "checkbox_text": "#2a221d",
+    "checkbox_bg": "#fffdf9",
+    "checkbox_border": "#d8cab9",
+    "checkbox_checked_bg": "#c8643b",
+    "checkbox_checked_border": "#b65731",
+    "input_bg": "#fffdf9",
+    "input_fg": "#221a16",
+    "input_border": "#d8cab9",
+    "input_focus": "#c8643b",
+    "input_disabled_bg": "#f4ece2",
+    "input_disabled_fg": "#8c7b6f",
+    "button_bg": "#efe4d7",
+    "button_fg": "#2a221d",
+    "button_border": "#d8cab9",
+    "button_hover": "#e6d7c6",
+    "primary_bg": "#c8643b",
+    "primary_fg": "#fff8f2",
+    "primary_border": "#b65731",
+    "primary_hover": "#b85b34",
+    "plan_bg": "#d8e9fa",
+    "plan_fg": "#23456a",
+    "plan_border": "#b6cfe7",
+    "plan_hover": "#cae0f4",
+    "run_bg": "#dcefdc",
+    "run_fg": "#275533",
+    "run_border": "#b9d6ba",
+    "run_hover": "#cde4ce",
+    "loop_bg": "#215a34",
+    "loop_fg": "#ffffff",
+    "loop_border": "#174325",
+    "loop_hover": "#2a6a3e",
+    "stop_bg": "#6f2222",
+    "stop_fg": "#ffffff",
+    "stop_border": "#551818",
+    "stop_hover": "#832929",
+    "terminal_button_bg": "#111111",
+    "terminal_button_fg": "#ffffff",
+    "terminal_button_border": "#000000",
+    "terminal_button_hover": "#222222",
+    "theme_toggle_bg": "#f1ebe2",
+    "theme_toggle_fg": "#58473d",
+    "theme_toggle_border": "#d8cab9",
+    "theme_toggle_hover": "#e8ddd0",
+    "theme_toggle_checked_bg": "#2b323a",
+    "theme_toggle_checked_fg": "#eff4fa",
+    "theme_toggle_checked_border": "#1f262d",
+    "small_action_bg": "#f4c9b3",
+    "small_action_fg": "#7a3c22",
+    "small_action_border": "#d3997e",
+    "muted_text": "#6d594d",
+    "sidebar_title": "#2a221d",
+    "board_list_bg": "#fbf8f3",
+    "board_list_fg": "#2a221d",
+    "board_list_border": "#e2d6c7",
+    "board_list_selected_bg": "#edd6c7",
+    "board_list_selected_fg": "#251c17",
+    "board_list_hover_bg": "#f1e7dc",
+    "board_title": "#1f1814",
+    "columns_bg": "#f3ece2",
+    "stage_scrollbar_bg": "rgba(243, 236, 226, 0.78)",
+    "stage_scrollbar_border": "rgba(119, 96, 80, 0.12)",
+    "stage_scrollbar_handle": "rgba(77, 62, 51, 0.25)",
+    "stage_scrollbar_handle_hover": "rgba(77, 62, 51, 0.36)",
+    "phase_column_bg": "#faf6ef",
+    "phase_column_border": "#ddcfbf",
+    "phase_drag_bg": "#f4eadf",
+    "phase_title": "#241c17",
+    "phase_count_bg": "#efe4d8",
+    "phase_count_fg": "#7f6658",
+    "task_card_bg": "#ffffff",
+    "task_card_border": "#eadfce",
+    "task_card_drag_bg": "#fff4e8",
+    "task_card_hover_bg": "#fff9f1",
+    "task_card_hover_border": "#d8c0a8",
+    "task_card_focus_bg": "#fff7eb",
+    "task_card_focus_border": "#cfa683",
+    "card_delete_bg": "#8f2f29",
+    "card_delete_fg": "#fff8f4",
+    "card_delete_border": "#70221d",
+    "card_delete_hover_bg": "#a33b34",
+    "card_delete_hover_border": "#81302a",
+    "card_delete_pressed_bg": "#74211c",
+    "card_delete_pressed_border": "#5f1c18",
+    "success_bg": "#e5f2e5",
+    "success_fg": "#2f6b44",
+    "success_border": "#c8dec9",
+    "success_hover_bg": "#d8ead9",
+    "success_hover_border": "#b8d2b8",
+    "reject_bg": "#f6dfdc",
+    "reject_fg": "#8f2f29",
+    "reject_border": "#ebc4bf",
+    "reject_hover_bg": "#f1cfca",
+    "reject_hover_border": "#dda8a1",
+    "needs_testing_bg": "#fff0d9",
+    "needs_testing_fg": "#8d5c15",
+    "needs_testing_border": "#ebd2a2",
+    "needs_testing_hover_bg": "#f8e2b8",
+    "needs_testing_hover_border": "#dfc08d",
+    "board_badge_bg": "#f5ddcf",
+    "board_badge_fg": "#934e2e",
+    "task_title": "#1f1814",
+    "task_context": "#655449",
+    "task_meta": "#957d6e",
+    "task_error": "#a13e35",
+    "column_empty": "#9b8577",
+    "terminal_title": "#1f1814",
+    "dialog_title": "#1f1814",
+    "dialog_dropdown_hover": "#f7f0e8",
+    "dialog_dropdown_pressed": "#efe4d7",
+    "menu_bg": "#fffdf9",
+    "menu_fg": "#221a16",
+    "menu_selected_bg": "#edd6c7",
+    "menu_selected_fg": "#251c17",
+    "menu_separator": "#eadfce",
+    "terminal_output_bg": "#171d22",
+    "terminal_output_fg": "#d7e0ea",
+    "terminal_output_border": "#273341",
+    "terminal_scroll_bg": "rgba(23, 29, 34, 0.24)",
+    "terminal_scroll_handle": "rgba(128, 145, 160, 0.58)",
+    "scrollbar_handle": "rgba(77, 62, 51, 0.16)",
+    "archived_text": "#a13e35",
+    "board_drop_fill": "#f5ddcf",
+    "board_drop_border": "#c8643b",
+    "board_archived_line": "#d7b4a6",
+    "splitter_handle_idle": "rgba(77, 62, 51, 0.28)",
+    "splitter_handle_hover": "rgba(77, 62, 51, 0.45)",
+    "stop_requested": "#a13e35",
+}
+UI_DARK_THEME: Dict[str, str] = {
+    **UI_LIGHT_THEME,
+    "main_window_bg": "#171b20",
+    "main_window_fg": "#e8ebef",
+    "shell_bg": "#20262d",
+    "shell_border": "#343e48",
+    "board_divider": "rgba(195, 205, 214, 0.10)",
+    "sidebar_bg": "#1c2228",
+    "sidebar_border": "#323b44",
+    "header_divider": "rgba(195, 205, 214, 0.14)",
+    "headline": "#f3f5f7",
+    "status_bg": "#3a2a23",
+    "status_fg": "#f0b596",
+    "top_field_label": "#9aa6b1",
+    "field_label": "#93a0ab",
+    "checkbox_text": "#dde4ea",
+    "checkbox_bg": "#252c34",
+    "checkbox_border": "#41505f",
+    "checkbox_checked_bg": "#d07a4e",
+    "checkbox_checked_border": "#b7653f",
+    "input_bg": "#252c34",
+    "input_fg": "#e7edf3",
+    "input_border": "#41505f",
+    "input_focus": "#d07a4e",
+    "input_disabled_bg": "#20262d",
+    "input_disabled_fg": "#74808c",
+    "button_bg": "#2c343d",
+    "button_fg": "#e8edf2",
+    "button_border": "#465362",
+    "button_hover": "#36404a",
+    "primary_bg": "#d07a4e",
+    "primary_fg": "#161a1f",
+    "primary_border": "#b7653f",
+    "primary_hover": "#df8a5e",
+    "plan_bg": "#24384c",
+    "plan_fg": "#cee4f9",
+    "plan_border": "#34516d",
+    "plan_hover": "#2b4560",
+    "run_bg": "#243f2e",
+    "run_fg": "#d5f0da",
+    "run_border": "#335842",
+    "run_hover": "#2b4d38",
+    "loop_bg": "#2d7a49",
+    "loop_fg": "#f4fff7",
+    "loop_border": "#215a36",
+    "loop_hover": "#359056",
+    "stop_bg": "#7f2f31",
+    "stop_fg": "#fff3f3",
+    "stop_border": "#5f2123",
+    "stop_hover": "#984042",
+    "terminal_button_bg": "#0f1317",
+    "terminal_button_fg": "#f3f6fa",
+    "terminal_button_border": "#06080a",
+    "terminal_button_hover": "#1b2229",
+    "theme_toggle_bg": "#2b333c",
+    "theme_toggle_fg": "#cfd7df",
+    "theme_toggle_border": "#46515c",
+    "theme_toggle_hover": "#333d48",
+    "theme_toggle_checked_bg": "#d07a4e",
+    "theme_toggle_checked_fg": "#15191d",
+    "theme_toggle_checked_border": "#b7653f",
+    "small_action_bg": "#4b352b",
+    "small_action_fg": "#f2c0a5",
+    "small_action_border": "#6c4a3c",
+    "muted_text": "#98a4af",
+    "sidebar_title": "#e6ebf0",
+    "board_list_bg": "#20262d",
+    "board_list_fg": "#e4eaf0",
+    "board_list_border": "#333d47",
+    "board_list_selected_bg": "#33404c",
+    "board_list_selected_fg": "#f3f7fa",
+    "board_list_hover_bg": "#29313a",
+    "board_title": "#f2f5f7",
+    "columns_bg": "#181d22",
+    "stage_scrollbar_bg": "rgba(24, 29, 34, 0.88)",
+    "stage_scrollbar_border": "rgba(201, 212, 223, 0.16)",
+    "stage_scrollbar_handle": "rgba(186, 198, 210, 0.30)",
+    "stage_scrollbar_handle_hover": "rgba(208, 220, 232, 0.46)",
+    "phase_column_bg": "#222930",
+    "phase_column_border": "#39444f",
+    "phase_drag_bg": "#2a3139",
+    "phase_title": "#eef2f5",
+    "phase_count_bg": "#303943",
+    "phase_count_fg": "#b9c4ce",
+    "task_card_bg": "#262d35",
+    "task_card_border": "#3d4752",
+    "task_card_drag_bg": "#322d28",
+    "task_card_hover_bg": "#2d3640",
+    "task_card_hover_border": "#536171",
+    "task_card_focus_bg": "#313b46",
+    "task_card_focus_border": "#d79a75",
+    "success_bg": "#203427",
+    "success_fg": "#bfe4c9",
+    "success_border": "#31513a",
+    "success_hover_bg": "#27402f",
+    "success_hover_border": "#3b6347",
+    "reject_bg": "#3c2626",
+    "reject_fg": "#f0b2aa",
+    "reject_border": "#603535",
+    "reject_hover_bg": "#492e2e",
+    "reject_hover_border": "#764646",
+    "needs_testing_bg": "#433621",
+    "needs_testing_fg": "#f2d196",
+    "needs_testing_border": "#685335",
+    "needs_testing_hover_bg": "#534228",
+    "needs_testing_hover_border": "#7f643d",
+    "board_badge_bg": "#413027",
+    "board_badge_fg": "#f0bc9d",
+    "task_title": "#f2f5f7",
+    "task_context": "#b5bfc8",
+    "task_meta": "#8f9ca7",
+    "task_error": "#f0a7a0",
+    "column_empty": "#7f8b95",
+    "terminal_title": "#eef2f5",
+    "dialog_title": "#eef2f5",
+    "dialog_dropdown_hover": "#2a333c",
+    "dialog_dropdown_pressed": "#343d47",
+    "menu_bg": "#252c34",
+    "menu_fg": "#e6ebf0",
+    "menu_selected_bg": "#33404c",
+    "menu_selected_fg": "#f3f7fa",
+    "menu_separator": "#3d4752",
+    "terminal_output_bg": "#0f1419",
+    "terminal_output_fg": "#dbe4ee",
+    "terminal_output_border": "#23303c",
+    "terminal_scroll_bg": "rgba(15, 20, 25, 0.34)",
+    "terminal_scroll_handle": "rgba(132, 148, 164, 0.68)",
+    "scrollbar_handle": "rgba(193, 205, 216, 0.20)",
+    "archived_text": "#f0a7a0",
+    "board_drop_fill": "#564038",
+    "board_drop_border": "#d07a4e",
+    "board_archived_line": "#705247",
+    "splitter_handle_idle": "rgba(196, 207, 217, 0.26)",
+    "splitter_handle_hover": "rgba(216, 226, 235, 0.44)",
+    "stop_requested": "#f0a7a0",
+}
+UI_THEMES = {
+    "light": UI_LIGHT_THEME,
+    "dark": UI_DARK_THEME,
+}
 
 
 def _macos_window_server_available() -> bool:
@@ -218,6 +501,17 @@ def _path_signature(path: Path) -> tuple[bool, int, int]:
 
 def _now_timestamp_label() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _normalize_theme_name(theme_name: str) -> str:
+    normalized = str(theme_name or "").strip().lower()
+    if normalized in UI_THEME_NAMES:
+        return normalized
+    return "light"
+
+
+def _theme_values(theme_name: str) -> Dict[str, str]:
+    return UI_THEMES[_normalize_theme_name(theme_name)]
 
 
 def _approval_response_path(control_dir: str | Path, request_id: str) -> Path:
@@ -1130,6 +1424,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
     app_root = Path(config.get("app_root", Path(__file__).resolve().parents[1])).resolve()
     taskbot_entry = app_root / "taskbot.py"
     ui_state_path = app_root / "state" / "ui_session.json"
+
+    def _active_theme(widget: Any) -> Dict[str, str]:
+        window = widget.window() if widget is not None else None
+        theme_name = getattr(window, "current_theme", "light") if window is not None else "light"
+        return _theme_values(theme_name)
     _FormDropdown = _create_form_dropdown_class(
         Qt=Qt,
         QAction=QAction,
@@ -1164,15 +1463,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
         return {
             "repo_root": str(payload.get("repo_root", "")).strip(),
             "selected_board_id": str(payload.get("selected_board_id", "")).strip(),
+            "theme": _normalize_theme_name(str(payload.get("theme", "")).strip()),
         }
 
-    def _save_session(repo_root: Path, selected_board_id: Optional[str]) -> None:
+    def _save_session(repo_root: Path, selected_board_id: Optional[str], theme_name: str) -> None:
         ui_state_path.parent.mkdir(parents=True, exist_ok=True)
         ui_state_path.write_text(
             json.dumps(
                 {
                     "repo_root": str(repo_root.resolve()),
                     "selected_board_id": selected_board_id or "",
+                    "theme": _normalize_theme_name(theme_name),
                 },
                 indent=2,
             )
@@ -1240,8 +1541,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
             line_rect = self._line_rect()
             if not line_rect.isValid():
                 return
+            theme = _active_theme(self)
             hovered = self.underMouse()
-            color = QColor(77, 62, 51, 114 if hovered else 72)
+            color = QColor(theme["splitter_handle_hover" if hovered else "splitter_handle_idle"])
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(line_rect, 1, 1)
@@ -2495,10 +2797,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
             count = index.data(self._count_role)
             is_archived = board_id == "archived" or title.lower() == "archived"
             if is_archived:
+                theme = _active_theme(self.parent())
                 option.font.setBold(True)
-                option.palette.setColor(QPalette.Text, QColor("#a13e35"))
-                option.palette.setColor(QPalette.WindowText, QColor("#a13e35"))
-                option.palette.setColor(QPalette.HighlightedText, QColor("#a13e35"))
+                option.palette.setColor(QPalette.Text, QColor(theme["archived_text"]))
+                option.palette.setColor(QPalette.WindowText, QColor(theme["archived_text"]))
+                option.palette.setColor(QPalette.HighlightedText, QColor(theme["archived_text"]))
             if count is None or option.rect.width() <= 0:
                 return
 
@@ -2520,12 +2823,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             except (TypeError, ValueError):
                 drop_target_row = -1
             if index.row() == drop_target_row:
+                theme = _active_theme(view)
                 painter.save()
                 painter.setRenderHint(QPainter.Antialiasing, True)
                 rect = option.rect.adjusted(2, 2, -2, -2)
-                fill = QColor("#f5ddcf")
+                fill = QColor(theme["board_drop_fill"])
                 fill.setAlpha(150)
-                border = QColor("#c8643b")
+                border = QColor(theme["board_drop_border"])
                 border.setAlpha(190)
                 painter.setPen(border)
                 painter.setBrush(fill)
@@ -2538,7 +2842,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
 
             painter.save()
-            painter.setPen(QColor("#d7b4a6"))
+            painter.setPen(QColor(_active_theme(view)["board_archived_line"]))
             y = option.rect.top()
             painter.drawLine(option.rect.left() + 8, y, option.rect.right() - 8, y)
             painter.restore()
@@ -2807,6 +3111,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def __init__(self) -> None:
             super().__init__()
             self.saved_session = _load_saved_session()
+            self.current_theme = _normalize_theme_name(self.saved_session.get("theme", "light"))
+            self.theme_values = _theme_values(self.current_theme)
             self.status_note = "Ready"
             self._last_terminal_text: Optional[str] = None
             self._store_signature: tuple[bool, int, int] | None = None
@@ -2838,7 +3144,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.setMinimumSize(1080, 720)
 
             self._build_ui()
-            self._apply_window_style()
+            self._set_theme(self.current_theme)
             self._rebuild_phase_columns(phase_labels(self.active_config))
             self._refresh_repo_widgets()
 
@@ -2912,6 +3218,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.status_chip = QLabel("Idle")
             self.status_chip.setObjectName("StatusChip")
             title_row.addWidget(self.status_chip, 0, Qt.AlignTop)
+
+            self.theme_toggle = QPushButton("Dark")
+            self.theme_toggle.setObjectName("ThemeToggleButton")
+            self.theme_toggle.setCheckable(True)
+            self.theme_toggle.setChecked(self.current_theme == "dark")
+            self.theme_toggle.setToolTip("Toggle the dark Material theme.")
+            self.theme_toggle.toggled.connect(self._on_theme_toggle_changed)
+            title_row.addWidget(self.theme_toggle, 0, Qt.AlignTop)
             header_stack.addLayout(title_row)
 
             repo_row = QHBoxLayout()
@@ -3206,12 +3520,37 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
             root.addWidget(self.main_splitter, 1)
 
+        def _persist_session(self, repo_root: Optional[Path] = None) -> None:
+            target_repo = repo_root or Path(self.active_config["repo_root"])
+            _save_session(target_repo, self.selected_board_id, self.current_theme)
+
+        def _on_theme_toggle_changed(self, checked: bool) -> None:
+            self._set_theme("dark" if checked else "light", persist=True)
+
+        def _set_theme(self, theme_name: str, persist: bool = False) -> None:
+            normalized_theme = _normalize_theme_name(theme_name)
+            self.current_theme = normalized_theme
+            self.theme_values = _theme_values(normalized_theme)
+            if hasattr(self, "theme_toggle"):
+                self.theme_toggle.blockSignals(True)
+                self.theme_toggle.setChecked(normalized_theme == "dark")
+                self.theme_toggle.blockSignals(False)
+            self._apply_window_style()
+            self.update()
+            if hasattr(self, "board_list"):
+                self.board_list.viewport().update()
+            if hasattr(self, "runtime_label") and hasattr(self, "status_chip"):
+                self._update_status_header(self._cached_boards, self._cached_tasks, self._cached_runtime_payload)
+            if persist:
+                self._persist_session()
+
         def _apply_window_style(self) -> None:
             checkbox_tick_icon = _checkbox_indicator_tick_icon_path().resolve().as_posix()
+            theme = self.theme_values
             stylesheet = """
             QMainWindow {
-                background: #efe7dc;
-                color: #261d18;
+                background: __MAIN_WINDOW_BG__;
+                color: __MAIN_WINDOW_FG__;
             }
 
             QWidget {
@@ -3221,24 +3560,24 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QFrame#TopShell,
             QFrame#BoardShell,
             QFrame#TerminalShell {
-                background: #fbf8f3;
-                border: 1px solid #ddcfbf;
+                background: __SHELL_BG__;
+                border: 1px solid __SHELL_BORDER__;
                 border-radius: 8px;
             }
 
             QFrame#BoardDivider {
-                background: rgba(77, 62, 51, 0.10);
+                background: __BOARD_DIVIDER__;
                 border: none;
             }
 
             QFrame#Sidebar {
-                background: #f5efe5;
-                border: 1px solid #ddd0bf;
+                background: __SIDEBAR_BG__;
+                border: 1px solid __SIDEBAR_BORDER__;
                 border-radius: 8px;
             }
 
             QFrame#HeaderDivider {
-                background: rgba(77, 62, 51, 0.12);
+                background: __HEADER_DIVIDER__;
                 border: none;
                 min-width: 1px;
                 max-width: 1px;
@@ -3246,36 +3585,57 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QLabel#Headline {
-                color: #1f1814;
+                color: __HEADLINE__;
                 font-size: 22px;
                 font-weight: 800;
             }
 
             QLabel#StatusChip {
-                background: #f5ddcf;
-                color: #8d4728;
+                background: __STATUS_BG__;
+                color: __STATUS_FG__;
                 border-radius: 4px;
                 padding: 4px 8px;
                 font-size: 11px;
                 font-weight: 700;
             }
 
+            QPushButton#ThemeToggleButton {
+                background: __THEME_TOGGLE_BG__;
+                color: __THEME_TOGGLE_FG__;
+                border: 1px solid __THEME_TOGGLE_BORDER__;
+                border-radius: 11px;
+                padding: 4px 10px;
+                min-height: 22px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+
+            QPushButton#ThemeToggleButton:hover {
+                background: __THEME_TOGGLE_HOVER__;
+            }
+
+            QPushButton#ThemeToggleButton:checked {
+                background: __THEME_TOGGLE_CHECKED_BG__;
+                color: __THEME_TOGGLE_CHECKED_FG__;
+                border: 1px solid __THEME_TOGGLE_CHECKED_BORDER__;
+            }
+
             QLabel#TopFieldLabel {
-                color: #765d4f;
+                color: __TOP_FIELD_LABEL__;
                 font-size: 10px;
                 font-weight: 700;
                 text-transform: uppercase;
             }
 
             QLabel#FieldLabel {
-                color: #6b584c;
+                color: __FIELD_LABEL__;
                 font-size: 10px;
                 font-weight: 700;
                 text-transform: uppercase;
             }
 
             QCheckBox {
-                color: #2a221d;
+                color: __CHECKBOX_TEXT__;
                 spacing: 6px;
                 font-size: 12px;
             }
@@ -3286,14 +3646,14 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QCheckBox::indicator:unchecked {
-                background: #fffdf9;
-                border: 1px solid #d8cab9;
+                background: __CHECKBOX_BG__;
+                border: 1px solid __CHECKBOX_BORDER__;
                 border-radius: 3px;
             }
 
             QCheckBox::indicator:checked {
-                background: #c8643b;
-                border: 1px solid #b65731;
+                background: __CHECKBOX_CHECKED_BG__;
+                border: 1px solid __CHECKBOX_CHECKED_BORDER__;
                 border-radius: 3px;
                 image: url("__CHECKBOX_TICK_ICON__");
             }
@@ -3304,9 +3664,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QSpinBox,
             QDialog#AppDialog QToolButton#DialogDropdown,
             QToolButton#HeaderBranchDropdown {
-                background: #fffdf9;
-                color: #221a16;
-                border: 1px solid #d8cab9;
+                background: __INPUT_BG__;
+                color: __INPUT_FG__;
+                border: 1px solid __INPUT_BORDER__;
                 border-radius: 4px;
                 padding: 6px 8px;
             }
@@ -3317,7 +3677,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QSpinBox:focus,
             QDialog#AppDialog QToolButton#DialogDropdown:focus,
             QToolButton#HeaderBranchDropdown:focus {
-                border: 1px solid #c8643b;
+                border: 1px solid __INPUT_FOCUS__;
             }
 
             QLineEdit#BoardSearchInput {
@@ -3326,16 +3686,16 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QSpinBox:disabled {
-                background: #f4ece2;
-                color: #8c7b6f;
+                background: __INPUT_DISABLED_BG__;
+                color: __INPUT_DISABLED_FG__;
             }
 
             QPushButton,
             QToolButton,
             QDialogButtonBox QPushButton {
-                background: #efe4d7;
-                color: #2a221d;
-                border: 1px solid #d8cab9;
+                background: __BUTTON_BG__;
+                color: __BUTTON_FG__;
+                border: 1px solid __BUTTON_BORDER__;
                 border-radius: 4px;
                 padding: 6px 10px;
                 font-weight: 600;
@@ -3344,69 +3704,69 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QPushButton:hover,
             QToolButton:hover,
             QDialogButtonBox QPushButton:hover {
-                background: #e6d7c6;
+                background: __BUTTON_HOVER__;
             }
 
             QPushButton#PrimaryButton,
             QPushButton#AccentButton {
-                background: #c8643b;
-                color: #fff8f2;
-                border: 1px solid #b65731;
+                background: __PRIMARY_BG__;
+                color: __PRIMARY_FG__;
+                border: 1px solid __PRIMARY_BORDER__;
             }
 
             QPushButton#PrimaryButton:hover,
             QPushButton#AccentButton:hover {
-                background: #b85b34;
+                background: __PRIMARY_HOVER__;
             }
 
             QPushButton#HeaderPlanButton {
-                background: #d8e9fa;
-                color: #23456a;
-                border: 1px solid #b6cfe7;
+                background: __PLAN_BG__;
+                color: __PLAN_FG__;
+                border: 1px solid __PLAN_BORDER__;
             }
 
             QPushButton#HeaderPlanButton:hover {
-                background: #cae0f4;
+                background: __PLAN_HOVER__;
             }
 
             QPushButton#HeaderRunButton {
-                background: #dcefdc;
-                color: #275533;
-                border: 1px solid #b9d6ba;
+                background: __RUN_BG__;
+                color: __RUN_FG__;
+                border: 1px solid __RUN_BORDER__;
             }
 
             QPushButton#HeaderRunButton:hover {
-                background: #cde4ce;
+                background: __RUN_HOVER__;
             }
 
             QPushButton#HeaderLoopButton {
-                background: #215a34;
-                color: #ffffff;
-                border: 1px solid #174325;
+                background: __LOOP_BG__;
+                color: __LOOP_FG__;
+                border: 1px solid __LOOP_BORDER__;
             }
 
             QPushButton#HeaderLoopButton:hover {
-                background: #2a6a3e;
+                background: __LOOP_HOVER__;
             }
 
             QPushButton#HeaderStopButton {
-                background: #6f2222;
-                color: #ffffff;
-                border: 1px solid #551818;
+                background: __STOP_BG__;
+                color: __STOP_FG__;
+                border: 1px solid __STOP_BORDER__;
             }
 
             QPushButton#HeaderStopButton:hover {
-                background: #832929;
+                background: __STOP_HOVER__;
             }
 
             QPushButton#HeaderOpenTerminalButton {
-                background: #111111;
-                color: #ffffff;
-                border: 1px solid #000000;
+                background: __TERMINAL_BUTTON_BG__;
+                color: __TERMINAL_BUTTON_FG__;
+                border: 1px solid __TERMINAL_BUTTON_BORDER__;
             }
 
             QPushButton#HeaderOpenTerminalButton:hover {
-                background: #222222;
+                background: __TERMINAL_BUTTON_HOVER__;
             }
 
             QToolButton#SmallActionButton {
@@ -3416,9 +3776,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 max-height: 24px;
                 font-size: 14px;
                 font-weight: 700;
-                background: #f4c9b3;
-                color: #7a3c22;
-                border: 1px solid #d3997e;
+                background: __SMALL_ACTION_BG__;
+                color: __SMALL_ACTION_FG__;
+                border: 1px solid __SMALL_ACTION_BORDER__;
                 border-radius: 4px;
                 padding: 0;
             }
@@ -3427,25 +3787,25 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QLabel#BoardSummary,
             QLabel#TerminalHint,
             QLabel#SidebarCaption {
-                color: #6d594d;
+                color: __MUTED_TEXT__;
                 font-size: 11px;
             }
 
             QLabel#DialogCaption {
-                color: #6d594d;
+                color: __MUTED_TEXT__;
                 font-size: 11px;
             }
 
             QLabel#SidebarTitle {
-                color: #2a221d;
+                color: __SIDEBAR_TITLE__;
                 font-size: 14px;
                 font-weight: 700;
             }
 
             QListWidget#BoardList {
-                background: #fbf8f3;
-                color: #2a221d;
-                border: 1px solid #e2d6c7;
+                background: __BOARD_LIST_BG__;
+                color: __BOARD_LIST_FG__;
+                border: 1px solid __BOARD_LIST_BORDER__;
                 border-radius: 4px;
                 padding: 3px;
             }
@@ -3457,46 +3817,46 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QListWidget#BoardList::item:selected {
-                background: #edd6c7;
-                color: #251c17;
+                background: __BOARD_LIST_SELECTED_BG__;
+                color: __BOARD_LIST_SELECTED_FG__;
             }
 
             QListWidget#BoardList::item:hover:!selected {
-                background: #f1e7dc;
+                background: __BOARD_LIST_HOVER_BG__;
             }
 
             QLabel#BoardTitle {
-                color: #1f1814;
+                color: __BOARD_TITLE__;
                 font-size: 16px;
                 font-weight: 700;
             }
 
             QScrollArea#ColumnsScroll {
                 border: none;
-                background: #f3ece2;
+                background: __COLUMNS_BG__;
             }
 
             QWidget#ColumnsViewport,
             QWidget#ColumnsContainer {
-                background: #f3ece2;
+                background: __COLUMNS_BG__;
             }
 
             QScrollBar#StageScrollBar:horizontal {
-                background: rgba(243, 236, 226, 0.78);
+                background: __STAGE_SCROLLBAR_BG__;
                 height: 12px;
                 margin: 0;
-                border: 1px solid rgba(119, 96, 80, 0.12);
+                border: 1px solid __STAGE_SCROLLBAR_BORDER__;
                 border-radius: 3px;
             }
 
             QScrollBar#StageScrollBar::handle:horizontal {
-                background: rgba(77, 62, 51, 0.25);
+                background: __STAGE_SCROLLBAR_HANDLE__;
                 min-width: 60px;
                 border-radius: 3px;
             }
 
             QScrollBar#StageScrollBar::handle:horizontal:hover {
-                background: rgba(77, 62, 51, 0.36);
+                background: __STAGE_SCROLLBAR_HANDLE_HOVER__;
             }
 
             QScrollBar#StageScrollBar::add-line:horizontal,
@@ -3517,25 +3877,25 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QFrame#PhaseColumn {
-                background: #faf6ef;
-                border: 1px solid #ddcfbf;
+                background: __PHASE_COLUMN_BG__;
+                border: 1px solid __PHASE_COLUMN_BORDER__;
                 border-radius: 6px;
             }
 
             QFrame#PhaseColumn[dragOver="true"] {
-                background: #f4eadf;
-                border: 1px solid #c8643b;
+                background: __PHASE_DRAG_BG__;
+                border: 1px solid __PRIMARY_BG__;
             }
 
             QLabel#PhaseTitle {
-                color: #241c17;
+                color: __PHASE_TITLE__;
                 font-size: 14px;
                 font-weight: 700;
             }
 
             QLabel#PhaseCount {
-                background: #efe4d8;
-                color: #7f6658;
+                background: __PHASE_COUNT_BG__;
+                color: __PHASE_COUNT_FG__;
                 border-radius: 3px;
                 padding: 2px 6px;
                 font-weight: 700;
@@ -3552,49 +3912,49 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QFrame#TaskCard {
-                background: #ffffff;
-                border: 1px solid #eadfce;
+                background: __TASK_CARD_BG__;
+                border: 1px solid __TASK_CARD_BORDER__;
                 border-radius: 6px;
             }
 
             QFrame#TaskCard[dragOver="true"] {
-                background: #fff4e8;
-                border: 1px solid #c8643b;
+                background: __TASK_CARD_DRAG_BG__;
+                border: 1px solid __PRIMARY_BG__;
             }
 
             QFrame#TaskCard:hover {
-                background: #fff9f1;
-                border: 1px solid #d8c0a8;
+                background: __TASK_CARD_HOVER_BG__;
+                border: 1px solid __TASK_CARD_HOVER_BORDER__;
             }
 
             QFrame#TaskCard:focus {
-                background: #fff7eb;
-                border: 1px solid #cfa683;
+                background: __TASK_CARD_FOCUS_BG__;
+                border: 1px solid __TASK_CARD_FOCUS_BORDER__;
                 outline: none;
             }
 
             QToolButton#CardDeleteButton {
-                background: #8f2f29;
-                color: #fff8f4;
-                border: 1px solid #70221d;
+                background: __CARD_DELETE_BG__;
+                color: __CARD_DELETE_FG__;
+                border: 1px solid __CARD_DELETE_BORDER__;
                 border-radius: 6px;
                 padding: 0px;
             }
 
             QToolButton#CardDeleteButton:hover {
-                background: #a33b34;
-                border: 1px solid #81302a;
+                background: __CARD_DELETE_HOVER_BG__;
+                border: 1px solid __CARD_DELETE_HOVER_BORDER__;
             }
 
             QToolButton#CardDeleteButton:pressed {
-                background: #74211c;
-                border: 1px solid #5f1c18;
+                background: __CARD_DELETE_PRESSED_BG__;
+                border: 1px solid __CARD_DELETE_PRESSED_BORDER__;
             }
 
             QToolButton#CardCompleteButton {
-                background: #e5f2e5;
-                color: #2f6b44;
-                border: 1px solid #c8dec9;
+                background: __SUCCESS_BG__;
+                color: __SUCCESS_FG__;
+                border: 1px solid __SUCCESS_BORDER__;
                 border-radius: 10px;
                 padding: 0px 8px;
                 font-size: 10px;
@@ -3602,40 +3962,40 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QToolButton#CardCompleteButton:hover {
-                background: #d8ead9;
-                border: 1px solid #b8d2b8;
+                background: __SUCCESS_HOVER_BG__;
+                border: 1px solid __SUCCESS_HOVER_BORDER__;
             }
 
             QToolButton#CardApproveButton {
-                background: #e5f2e5;
-                color: #2f6b44;
-                border: 1px solid #c8dec9;
+                background: __SUCCESS_BG__;
+                color: __SUCCESS_FG__;
+                border: 1px solid __SUCCESS_BORDER__;
                 border-radius: 10px;
                 padding: 3px;
             }
 
             QToolButton#CardApproveButton:hover {
-                background: #d8ead9;
-                border: 1px solid #b8d2b8;
+                background: __SUCCESS_HOVER_BG__;
+                border: 1px solid __SUCCESS_HOVER_BORDER__;
             }
 
             QToolButton#CardRejectButton {
-                background: #f6dfdc;
-                color: #8f2f29;
-                border: 1px solid #ebc4bf;
+                background: __REJECT_BG__;
+                color: __REJECT_FG__;
+                border: 1px solid __REJECT_BORDER__;
                 border-radius: 10px;
                 padding: 3px;
             }
 
             QToolButton#CardRejectButton:hover {
-                background: #f1cfca;
-                border: 1px solid #dda8a1;
+                background: __REJECT_HOVER_BG__;
+                border: 1px solid __REJECT_HOVER_BORDER__;
             }
 
             QToolButton#CardNeedsTestingButton {
-                background: #fff0d9;
-                color: #8d5c15;
-                border: 1px solid #ebd2a2;
+                background: __NEEDS_TESTING_BG__;
+                color: __NEEDS_TESTING_FG__;
+                border: 1px solid __NEEDS_TESTING_BORDER__;
                 border-radius: 10px;
                 padding: 0px 8px;
                 font-size: 10px;
@@ -3643,13 +4003,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QToolButton#CardNeedsTestingButton:hover {
-                background: #f8e2b8;
-                border: 1px solid #dfc08d;
+                background: __NEEDS_TESTING_HOVER_BG__;
+                border: 1px solid __NEEDS_TESTING_HOVER_BORDER__;
             }
 
             QLabel#BoardBadge {
-                background: #f5ddcf;
-                color: #934e2e;
+                background: __BOARD_BADGE_BG__;
+                color: __BOARD_BADGE_FG__;
                 border-radius: 3px;
                 padding: 2px 5px;
                 font-size: 10px;
@@ -3657,59 +4017,59 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QLabel#TaskTitle {
-                color: #1f1814;
+                color: __TASK_TITLE__;
                 font-size: 14px;
                 font-weight: 700;
             }
 
             QLabel#TaskContext {
-                color: #655449;
+                color: __TASK_CONTEXT__;
                 font-size: 12px;
             }
 
             QLabel#TaskMeta {
-                color: #957d6e;
+                color: __TASK_META__;
                 font-size: 10px;
                 font-weight: 600;
             }
 
             QLabel#TaskError {
-                color: #a13e35;
+                color: __TASK_ERROR__;
                 font-size: 11px;
                 font-weight: 600;
             }
 
             QLabel#ColumnEmpty {
-                color: #9b8577;
+                color: __COLUMN_EMPTY__;
                 font-style: italic;
                 padding: 10px 2px;
             }
 
             QLabel#TerminalTitle {
-                color: #1f1814;
+                color: __TERMINAL_TITLE__;
                 font-size: 14px;
                 font-weight: 700;
             }
 
             QLabel#DialogTitle {
-                color: #1f1814;
+                color: __DIALOG_TITLE__;
                 font-size: 14px;
                 font-weight: 700;
             }
 
             QDialog#AppDialog {
-                background: #fbf8f3;
-                border: 1px solid #ddcfbf;
+                background: __SHELL_BG__;
+                border: 1px solid __SHELL_BORDER__;
                 border-radius: 8px;
             }
 
             QDialog#AppDialog QScrollArea#SettingsScrollArea {
-                background: #fbf8f3;
+                background: __SHELL_BG__;
                 border: none;
             }
 
             QDialog#AppDialog QWidget#SettingsContent {
-                background: #fbf8f3;
+                background: __SHELL_BG__;
             }
 
             QDialog#AppDialog QToolButton#DialogDropdown {
@@ -3720,11 +4080,11 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QDialog#AppDialog QToolButton#DialogDropdown:hover {
-                background: #f7f0e8;
+                background: __DIALOG_DROPDOWN_HOVER__;
             }
 
             QDialog#AppDialog QToolButton#DialogDropdown:pressed {
-                background: #efe4d7;
+                background: __DIALOG_DROPDOWN_PRESSED__;
             }
 
             QDialog#AppDialog QToolButton#DialogDropdown::menu-indicator {
@@ -3735,17 +4095,17 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QDialog#AppDialog QScrollArea#SettingsScrollArea > QWidget {
-                background: #fbf8f3;
+                background: __SHELL_BG__;
             }
 
             QDialog#AppDialog QScrollArea#SettingsScrollArea > QWidget > QWidget {
-                background: #fbf8f3;
+                background: __SHELL_BG__;
             }
 
             QDialog#AppDialog QMenu#DialogDropdownMenu {
-                background: #fffdf9;
-                color: #221a16;
-                border: 1px solid #d8cab9;
+                background: __MENU_BG__;
+                color: __MENU_FG__;
+                border: 1px solid __INPUT_BORDER__;
             }
 
             QDialog#AppDialog QMenu#DialogDropdownMenu::item {
@@ -3753,13 +4113,13 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QDialog#AppDialog QMenu#DialogDropdownMenu::item:selected {
-                background: #edd6c7;
-                color: #251c17;
+                background: __MENU_SELECTED_BG__;
+                color: __MENU_SELECTED_FG__;
             }
 
             QDialog#AppDialog QMenu#DialogDropdownMenu::separator {
                 height: 1px;
-                background: #eadfce;
+                background: __MENU_SEPARATOR__;
                 margin: 4px 6px;
             }
 
@@ -3768,33 +4128,33 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QTextEdit#TerminalOutput {
-                background: #171d22;
-                color: #d7e0ea;
-                border: 1px solid #273341;
+                background: __TERMINAL_OUTPUT_BG__;
+                color: __TERMINAL_OUTPUT_FG__;
+                border: 1px solid __TERMINAL_OUTPUT_BORDER__;
                 border-radius: 4px;
                 padding: 8px;
             }
 
             QTextEdit#TerminalOutput QScrollBar:vertical {
-                background: rgba(23, 29, 34, 0.24);
+                background: __TERMINAL_SCROLL_BG__;
                 width: 10px;
                 margin: 2px 1px 2px 1px;
             }
 
             QTextEdit#TerminalOutput QScrollBar::handle:vertical {
-                background: rgba(128, 145, 160, 0.58);
+                background: __TERMINAL_SCROLL_HANDLE__;
                 min-height: 36px;
                 border-radius: 4px;
             }
 
             QTextEdit#TerminalOutput QScrollBar:horizontal {
-                background: rgba(23, 29, 34, 0.24);
+                background: __TERMINAL_SCROLL_BG__;
                 height: 10px;
                 margin: 1px 2px 1px 2px;
             }
 
             QTextEdit#TerminalOutput QScrollBar::handle:horizontal {
-                background: rgba(128, 145, 160, 0.58);
+                background: __TERMINAL_SCROLL_HANDLE__;
                 min-width: 36px;
                 border-radius: 4px;
             }
@@ -3806,7 +4166,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QScrollBar::handle:vertical {
-                background: rgba(77, 62, 51, 0.16);
+                background: __SCROLLBAR_HANDLE__;
                 min-height: 28px;
                 border-radius: 3px;
             }
@@ -3832,7 +4192,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             }
 
             QScrollBar::handle:horizontal {
-                background: rgba(77, 62, 51, 0.16);
+                background: __SCROLLBAR_HANDLE__;
                 min-width: 28px;
                 border-radius: 3px;
             }
@@ -3850,7 +4210,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             QScrollBar::sub-page:horizontal {
                 background: transparent;
             }
-            """.replace("__CHECKBOX_TICK_ICON__", checkbox_tick_icon)
+            """
+            replacements = {"checkbox_tick_icon": checkbox_tick_icon, **theme}
+            for key, value in replacements.items():
+                stylesheet = stylesheet.replace("__{0}__".format(key.upper()), value)
             self.setStyleSheet(stylesheet)
 
         def _refresh_repo_widgets(self) -> None:
@@ -4207,7 +4570,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.status_note = "Loaded repo {0}".format(repo_root.name)
             self._invalidate_refresh_cache()
             self._refresh_repo_widgets()
-            _save_session(repo_root, self.selected_board_id)
+            self._persist_session(repo_root)
             self.refresh_view()
 
         def _on_branch_selection_changed(self, _index: int) -> None:
@@ -4241,7 +4604,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.status_note = "Switched to branch {0}".format(checkout_result.branch)
             self._invalidate_refresh_cache()
             self._refresh_repo_widgets()
-            _save_session(repo_root, self.selected_board_id)
+            self._persist_session(repo_root)
             self.refresh_view()
 
         def _open_repo_terminal(self) -> None:
@@ -4409,7 +4772,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.selected_board_id = renamed_board_id
                 self.status_note = "Renamed board {0} to {1}".format(board.get("title", ""), updated["title"])
                 _sync_dialog_board_titles(self._open_dialogs, str(board.get("title", "")), str(updated["title"]))
-                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._persist_session(Path(active_config["repo_root"]))
                 self._invalidate_refresh_cache()
                 self.refresh_view()
                 default_board_update_error = str(updated.get("default_board_update_error", "")).strip()
@@ -4456,7 +4819,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             if self.selected_board_id == deleted["board_id"]:
                 self.selected_board_id = None
             self.status_note = "Deleted board {0}".format(deleted["title"])
-            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._persist_session()
             self._activate_repo_config(Path(self.active_config["repo_root"]))
             self.refresh_view()
 
@@ -4473,7 +4836,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     return
                 self.selected_board_id = board["board_id"]
                 self.status_note = "Created board {0}".format(board["title"])
-                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._persist_session(Path(active_config["repo_root"]))
                 self._activate_repo_config(Path(active_config["repo_root"]))
                 self.refresh_view()
 
@@ -4504,7 +4867,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     return
                 self.selected_board_id = task.board_id
                 self.status_note = "Added task {0}".format(task.task_id)
-                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._persist_session(Path(active_config["repo_root"]))
                 self._activate_repo_config(Path(active_config["repo_root"]))
                 self.refresh_view()
 
@@ -4526,7 +4889,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     return None
 
                 self.status_note = "Created board {0}".format(board["title"])
-                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._persist_session(Path(active_config["repo_root"]))
                 self._activate_repo_config(Path(active_config["repo_root"]))
                 self.refresh_view()
                 return str(board["title"])
@@ -4551,7 +4914,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                     return
                 self.selected_board_id = updated.board_id
                 self.status_note = "Updated task {0}".format(updated.task_id)
-                _save_session(Path(active_config["repo_root"]), self.selected_board_id)
+                self._persist_session(Path(active_config["repo_root"]))
                 self._activate_repo_config(Path(active_config["repo_root"]))
                 self.refresh_view()
 
@@ -4580,7 +4943,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
 
             self.status_note = "Deleted task {0}".format(deleted.task_id)
-            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._persist_session()
             self.refresh_view()
 
         def _move_task_to_phase(self, task: StoredTask | str, phase: str) -> None:
@@ -4601,7 +4964,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.status_note = "Completed task {0}".format(updated.task_id)
             else:
                 self.status_note = "Moved task {0} to {1}".format(updated.task_id, _phase_label(phase))
-            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._persist_session()
             self._activate_repo_config(Path(self.active_config["repo_root"]))
             QTimer.singleShot(0, self.refresh_view)
 
@@ -4641,7 +5004,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             self.selected_board_id = updated.board_id
             self.status_note = "Returned task {0} to Backlog with testing feedback".format(updated.task_id)
-            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._persist_session()
             self._activate_repo_config(Path(self.active_config["repo_root"]))
             self.refresh_view()
 
@@ -4662,7 +5025,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.status_note = "Archived task {0}".format(updated.task_id)
             else:
                 self.status_note = "Moved task {0} to {1}".format(updated.task_id, updated.board_title)
-            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._persist_session()
             self.refresh_view()
 
         def _start_task(self, task_id: str) -> None:
@@ -4717,7 +5080,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                                         current: QListWidgetItem | None,
                                         _previous: QListWidgetItem | None) -> None:
             self.selected_board_id = current.data(Qt.UserRole) if current is not None else None
-            _save_session(Path(self.active_config["repo_root"]), self.selected_board_id)
+            self._persist_session()
             self.refresh_view()
 
         def _update_status_header(self,
@@ -4728,7 +5091,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
             stop_requested = self._stop_path().exists() or self.status_note.lower() == "stop requested"
             note_html = html.escape(self.status_note)
             if stop_requested:
-                note_html = '<span style="color:#a13e35; font-weight:700;">Stop Requested</span>'
+                note_html = '<span style="color:{0}; font-weight:700;">Stop Requested</span>'.format(
+                    self.theme_values["stop_requested"]
+                )
             active_tasks = self._active_tasks(tasks)
             self.status_chip.setText(runner_phase.upper())
             self.runtime_label.setText(

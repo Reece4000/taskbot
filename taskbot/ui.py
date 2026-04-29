@@ -374,8 +374,8 @@ UI_DARK_THEME: Dict[str, str] = {
     "board_drop_fill": "#564038",
     "board_drop_border": "#d07a4e",
     "board_archived_line": "#705247",
-    "splitter_handle_idle": "rgba(196, 207, 217, 0.26)",
-    "splitter_handle_hover": "rgba(216, 226, 235, 0.44)",
+    "splitter_handle_idle": "rgba(218, 228, 240, 0.45)",
+    "splitter_handle_hover": "rgba(236, 242, 250, 0.72)",
     "stop_requested": "#f0a7a0",
 }
 UI_THEMES = {
@@ -1420,6 +1420,28 @@ def launch_ui(config: Dict[str, Any]) -> int:
         )
         return 1
 
+    _theme_rgba_css = re.compile(
+        r"^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*$",
+        re.IGNORECASE,
+    )
+
+    def _theme_qcolor(css: str) -> QColor:
+        """Resolve theme colors for QPainter. QColor rejects CSS rgba(...); invalid colors paint black."""
+        normalized = str(css or "").strip()
+        rgba_match = _theme_rgba_css.match(normalized)
+        if rgba_match is not None:
+            r = max(0, min(255, int(rgba_match.group(1))))
+            g = max(0, min(255, int(rgba_match.group(2))))
+            b = max(0, min(255, int(rgba_match.group(3))))
+            a_src = rgba_match.group(4)
+            if "." in a_src:
+                alpha_f = max(0.0, min(1.0, float(a_src)))
+                a = int(round(alpha_f * 255))
+            else:
+                a = max(0, min(255, int(a_src)))
+            return QColor(r, g, b, a)
+        return QColor(normalized)
+
     refresh_ms = max(250, int(float(config.get("ui", {}).get("refresh_seconds", 1.0)) * 1000))
     tail_lines = int(config.get("ui", {}).get("terminal_tail_lines", 250))
     app_root = Path(config.get("app_root", Path(__file__).resolve().parents[1])).resolve()
@@ -1544,7 +1566,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             theme = _active_theme(self)
             hovered = self.underMouse()
-            color = QColor(theme["splitter_handle_hover" if hovered else "splitter_handle_idle"])
+            color = _theme_qcolor(theme["splitter_handle_hover" if hovered else "splitter_handle_idle"])
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(line_rect, 1, 1)

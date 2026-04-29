@@ -1378,8 +1378,9 @@ def launch_ui(config: Dict[str, Any]) -> int:
         return 1
 
     try:
-        from PySide6.QtCore import QEvent, QObject, QSize, QTimer, Qt, QMimeData, QRect, Signal
+        from PySide6.QtCore import QEvent, QObject, QSize, QByteArray, QTimer, Qt, QMimeData, QRect, QRectF, Signal
         from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette, QTextOption
+        from PySide6.QtSvg import QSvgRenderer
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -1552,6 +1553,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def createHandle(self) -> QSplitterHandle:
             return _CenteredSplitterHandle(self.orientation(), self)
 
+    _theme_toggle_icons_dir = Path(__file__).resolve().parents[1] / "resources"
+    _theme_toggle_light_svg_raw = (_theme_toggle_icons_dir / "light_mode.svg").read_text(encoding="utf-8")
+    _theme_toggle_dark_svg_raw = (_theme_toggle_icons_dir / "dark_mode.svg").read_text(encoding="utf-8")
+
     class _ThemeToggleButton(QPushButton):
         def __init__(self, parent: QWidget | None = None) -> None:
             super().__init__("", parent)
@@ -1561,47 +1566,15 @@ def launch_ui(config: Dict[str, Any]) -> int:
         def sizeHint(self) -> QSize:
             return QSize(56, 24)
 
-        def _draw_sun_icon(self, painter: QPainter, rect: QRect, color: QColor) -> None:
+        def _draw_toggle_svg(self, painter: QPainter, rect: QRect, svg_markup: str, tint: QColor) -> None:
             if not rect.isValid():
                 return
+            fill_hex = QColor(tint).name(QColor.NameFormat.HexRgb)
+            tinted_markup = re.sub(r'fill="#[^"]*"', f'fill="{fill_hex}"', svg_markup, count=1)
+            renderer = QSvgRenderer(QByteArray(tinted_markup.encode("utf-8")))
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, True)
-            center = rect.center()
-            radius = max(3, min(rect.width(), rect.height()) // 5)
-            pen = color
-            pen.setAlpha(235)
-            painter.setPen(pen)
-            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0), (1, -1), (1, 1), (-1, 1), (-1, -1)):
-                painter.drawLine(
-                    center.x() + int(dx * (radius + 2)),
-                    center.y() + int(dy * (radius + 2)),
-                    center.x() + int(dx * (radius + 4)),
-                    center.y() + int(dy * (radius + 4)),
-                )
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawEllipse(center, radius, radius)
-            painter.restore()
-
-        def _draw_moon_icon(
-            self,
-            painter: QPainter,
-            rect: QRect,
-            color: QColor,
-            mask_color: QColor,
-        ) -> None:
-            if not rect.isValid():
-                return
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            size = max(8, min(rect.width(), rect.height()) - 6)
-            x = rect.center().x() - size // 2
-            y = rect.center().y() - size // 2
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawEllipse(x, y, size, size)
-            painter.setBrush(mask_color)
-            painter.drawEllipse(x + max(2, size // 4), y + 1, size, size)
+            renderer.render(painter, QRectF(rect))
             painter.restore()
 
         def paintEvent(self, event) -> None:
@@ -1638,14 +1611,21 @@ def launch_ui(config: Dict[str, Any]) -> int:
             painter.drawEllipse(thumb_rect)
 
             icon_size = max(10, thumb_size - 6)
+            tc = thumb_rect.center()
+            thumb_icon_rect = QRect(tc.x() - icon_size // 2, tc.y() - icon_size // 2, icon_size, icon_size)
             left_icon_rect = QRect(track_rect.x() + 6, track_rect.y() + 3, icon_size, icon_size)
             right_icon_rect = QRect(track_rect.right() - icon_size - 6, track_rect.y() + 3, icon_size, icon_size)
-            self._draw_sun_icon(painter, thumb_rect if not checked else left_icon_rect, active_icon if not checked else inactive_icon)
-            self._draw_moon_icon(
+            self._draw_toggle_svg(
                 painter,
-                thumb_rect if checked else right_icon_rect,
+                thumb_icon_rect if not checked else left_icon_rect,
+                _theme_toggle_light_svg_raw,
+                active_icon if not checked else inactive_icon,
+            )
+            self._draw_toggle_svg(
+                painter,
+                thumb_icon_rect if checked else right_icon_rect,
+                _theme_toggle_dark_svg_raw,
                 active_icon if checked else inactive_icon,
-                thumb_fill if checked else track_fill,
             )
 
             if self.hasFocus():

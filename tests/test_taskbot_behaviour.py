@@ -298,6 +298,7 @@ class TaskbotBehaviourTests(unittest.TestCase):
 
     def test_board_summary_text_for_selected_board_uses_phase_counts(self) -> None:
         planning_task = self._example_stored_task()
+        planning_task.phase = "planning"
         ready_task = self._example_stored_task()
         ready_task.task_id = "engineering-5678"
         ready_task.phase = "ready"

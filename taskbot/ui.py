@@ -34,6 +34,7 @@ from taskbot.store import (
     move_task_to_board,
     rename_board,
     store_path,
+    update_task_fields,
     update_task_phase,
 )
 from taskbot.terminal_stream import read_terminal_tail, terminal_log_path
@@ -731,6 +732,169 @@ def _repo_agents_path(repo_root: Path) -> Path:
     return resolved_repo / "agents.md"
 
 
+def _configured_reasoning_effort(config: Dict[str, Any], role: str) -> Optional[str]:
+    models = config.get("models", {})
+    configured_value = models.get("{0}_reasoning_effort".format(role))
+    if configured_value is None:
+        return None
+    cleaned = str(configured_value).strip()
+    return cleaned or None
+
+
+def _ticket_development_schema_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "schemas" / "ticket_development.schema.json"
+
+
+def _build_ticket_development_prompt(
+    repo_root: Path,
+    board_titles: List[str],
+    phase_order: List[str],
+    transcript: List[Dict[str, str]],
+) -> str:
+    cleaned_boards = [str(item).strip() for item in board_titles if str(item).strip()]
+    if not cleaned_boards:
+        cleaned_boards = ["General"]
+    cleaned_phases = [str(item).strip() for item in phase_order if str(item).strip()]
+    if not cleaned_phases:
+        cleaned_phases = ["backlog", "planning", "ready", "in_progress", "needs_testing", "blocked", "completed"]
+    payload = {
+        "repo_root": str(repo_root.resolve()),
+        "existing_boards": cleaned_boards,
+        "workflow_phases": cleaned_phases,
+        "conversation": transcript,
+    }
+    return """You are Taskbot's ticket development agent.
+
+Your job is to turn messy user notes into concrete execution tickets for a repo-local Codex implementation loop.
+You may inspect the repository when that helps clarify likely files, existing behaviour, naming, or constraints.
+
+Conversation and repo context:
+{payload}
+
+Operating rules:
+- Be methodical. Extract multiple tickets when the notes contain multiple independent changes.
+- Ask targeted follow-up questions when expectations, behaviour, constraints, or acceptance criteria are unclear.
+- If a ticket is clear enough to implement, include it in `tickets`.
+- If one clear ticket and one unclear ticket are both present, create the clear ticket and ask only about the unclear part.
+- Ready tickets must be concrete enough for the execution agent to start without a separate planning pass.
+- Complex or broad tickets should use phase `planning`; simple and well-scoped tickets should use phase `ready`.
+- Use existing board names when they fit; otherwise propose a concise board title.
+- Keep ticket titles imperative and specific.
+- Context notes should include relevant user intent, decisions made in the chat, repo observations, constraints, and non-goals.
+- Acceptance criteria must be observable and testable.
+- File targets should be repo-relative paths only when you have useful confidence.
+- For `ready` tickets, include an implementation `plan` matching Taskbot's plan shape. Keep it concise but actionable.
+- For `planning` tickets, omit the plan or set it to null.
+- Do not edit files and do not modify Taskbot's task store.
+
+Return JSON only. Do not wrap it in Markdown.
+""".format(payload=json.dumps(payload, indent=2))
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return {}
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        try:
+            match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, re.DOTALL)
+            if match is not None:
+                parsed = json.loads(match.group(1))
+            else:
+                start = stripped.find("{")
+                end = stripped.rfind("}")
+                if start < 0 or end <= start:
+                    return {}
+                parsed = json.loads(stripped[start:end + 1])
+        except json.JSONDecodeError:
+            return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _ticket_development_payload_from_text(text: str) -> Dict[str, Any]:
+    payload = _extract_json_object(text)
+    if not payload:
+        return {"message": str(text or "").strip(), "questions": [], "tickets": []}
+    questions = payload.get("questions", [])
+    tickets = payload.get("tickets", [])
+    return {
+        "message": str(payload.get("message", "")).strip(),
+        "questions": [str(item).strip() for item in questions if str(item).strip()] if isinstance(questions, list) else [],
+        "tickets": [item for item in tickets if isinstance(item, dict)] if isinstance(tickets, list) else [],
+    }
+
+
+def _normalise_ticket_plan(ticket: Dict[str, Any]) -> Dict[str, Any]:
+    raw_plan = ticket.get("plan")
+    if isinstance(raw_plan, dict):
+        relevant_files = [
+            str(item).strip()
+            for item in raw_plan.get("relevant_files", ticket.get("file_targets", []))
+            if str(item).strip()
+        ]
+        raw_steps = raw_plan.get("steps", [])
+        steps: List[Dict[str, Any]] = []
+        if isinstance(raw_steps, list):
+            for item in raw_steps:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title", "")).strip() or "Implement the ticket"
+                details = str(item.get("details", "")).strip() or str(ticket.get("context_notes", "")).strip()
+                files = [str(path).strip() for path in item.get("files", []) if str(path).strip()]
+                steps.append(
+                    {
+                        "title": title,
+                        "details": details or "Make the requested change while preserving existing behaviour.",
+                        "files": files,
+                        "parallelisable": bool(item.get("parallelisable", False)),
+                    }
+                )
+        if steps:
+            return {
+                "summary": str(raw_plan.get("summary", "")).strip() or str(ticket.get("title", "")).strip(),
+                "constraints": [str(item).strip() for item in raw_plan.get("constraints", []) if str(item).strip()],
+                "relevant_files": relevant_files,
+                "steps": steps,
+                "verification": [str(item).strip() for item in raw_plan.get("verification", []) if str(item).strip()],
+                "subagent_splits": [
+                    item
+                    for item in raw_plan.get("subagent_splits", [])
+                    if isinstance(item, dict)
+                ],
+                "decomposition": {
+                    "should_split": False,
+                    "reason": "",
+                    "subtasks": [],
+                },
+            }
+
+    file_targets = [str(item).strip() for item in ticket.get("file_targets", []) if str(item).strip()]
+    acceptance = [str(item).strip() for item in ticket.get("acceptance", []) if str(item).strip()]
+    details = str(ticket.get("context_notes", "")).strip() or str(ticket.get("title", "")).strip()
+    return {
+        "summary": str(ticket.get("title", "")).strip(),
+        "constraints": [],
+        "relevant_files": file_targets,
+        "steps": [
+            {
+                "title": "Implement the ticket",
+                "details": details or "Make the requested change while preserving existing behaviour.",
+                "files": file_targets,
+                "parallelisable": False,
+            }
+        ],
+        "verification": acceptance,
+        "subagent_splits": [],
+        "decomposition": {
+            "should_split": False,
+            "reason": "",
+            "subtasks": [],
+        },
+    }
+
+
 def _config_path_label_for_header(active_config: Dict[str, Any]) -> str:
     config_path_text = str(active_config.get("config_path", "")).strip()
     if not config_path_text:
@@ -1378,7 +1542,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
         return 1
 
     try:
-        from PySide6.QtCore import QEvent, QObject, QSize, QByteArray, QTimer, Qt, QMimeData, QRect, QRectF, Signal
+        from PySide6.QtCore import QEvent, QObject, QSize, QByteArray, QProcess, QTimer, Qt, QMimeData, QRect, QRectF, Signal
         from PySide6.QtGui import QAction, QDrag, QFont, QFontDatabase, QIcon, QKeySequence, QShortcut, QTextCursor, QColor, QPainter, QPalette, QTextOption
         from PySide6.QtSvg import QSvgRenderer
         from PySide6.QtWidgets import (
@@ -2224,6 +2388,382 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def feedback_notes(self) -> str:
             return self.notes_input.toPlainText().strip()
+
+    class TicketDevelopmentDialog(QDialog):
+        def __init__(
+            self,
+            active_config: Dict[str, Any],
+            board_titles: List[str],
+            phase_order: List[str],
+            on_tickets_created: Any,
+            parent: QWidget | None = None,
+        ) -> None:
+            super().__init__(parent)
+            self.active_config = active_config
+            self.board_titles = list(board_titles)
+            self.phase_order = list(phase_order)
+            self._on_tickets_created = on_tickets_created
+            self._messages: List[Dict[str, str]] = []
+            self._process: QProcess | None = None
+            self._stdout_buffer = ""
+            self._stderr_text = ""
+            self._agent_message_text = ""
+            self._last_message_path: Path | None = None
+            self._busy = False
+
+            self.setObjectName("AppDialog")
+            self.setWindowTitle("Develop Tickets")
+            self.setModal(False)
+            self.setSizeGripEnabled(True)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(10)
+
+            title = QLabel("Develop Tickets")
+            title.setObjectName("DialogTitle")
+            layout.addWidget(title)
+
+            caption = QLabel("Paste notes, answer questions, and Taskbot will create ready or planning cards.")
+            caption.setObjectName("DialogCaption")
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
+
+            self.transcript_view = QTextEdit()
+            self.transcript_view.setObjectName("TicketChatTranscript")
+            self.transcript_view.setReadOnly(True)
+            self.transcript_view.setMinimumHeight(320)
+            self.transcript_view.setLineWrapMode(QTextEdit.WidgetWidth)
+            layout.addWidget(self.transcript_view, 1)
+
+            self.input_editor = QPlainTextEdit()
+            self.input_editor.setPlaceholderText("Paste notes or answer the agent's questions.")
+            self.input_editor.setFixedHeight(120)
+            layout.addWidget(self.input_editor)
+
+            button_row = QHBoxLayout()
+            button_row.setContentsMargins(0, 0, 0, 0)
+            button_row.setSpacing(8)
+
+            self.status_label = QLabel("")
+            self.status_label.setObjectName("SidebarCaption")
+            self.status_label.setWordWrap(False)
+            button_row.addWidget(self.status_label, 1)
+
+            self.stop_button = QPushButton("Stop")
+            self.stop_button.setEnabled(False)
+            self.stop_button.clicked.connect(self._stop_agent)
+            button_row.addWidget(self.stop_button)
+
+            self.send_button = QPushButton("Send")
+            self.send_button.setObjectName("PrimaryButton")
+            self.send_button.clicked.connect(self._send_message)
+            button_row.addWidget(self.send_button)
+
+            close_button = QPushButton("Close")
+            close_button.clicked.connect(self.reject)
+            button_row.addWidget(close_button)
+            layout.addLayout(button_row)
+
+            self.resize(780, 720)
+            self._append_system("Paste rough notes to begin. The agent can inspect the repo before creating cards.")
+            self.input_editor.setFocus()
+
+        def _append_html(self, html_text: str) -> None:
+            self.transcript_view.append(html_text)
+            scrollbar = self.transcript_view.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+        def _append_message(self, role: str, text: str) -> None:
+            cleaned = str(text or "").strip()
+            if not cleaned:
+                return
+            label = html.escape(role)
+            body = html.escape(cleaned).replace("\n", "<br>")
+            self._append_html("<p><b>{0}</b><br>{1}</p>".format(label, body))
+
+        def _append_system(self, text: str) -> None:
+            cleaned = str(text or "").strip()
+            if not cleaned:
+                return
+            self._append_html(
+                '<p><span style="color:#7d8790;">{0}</span></p>'.format(
+                    html.escape(cleaned).replace("\n", "<br>")
+                )
+            )
+
+        def _set_busy(self, busy: bool, status: str = "") -> None:
+            self._busy = busy
+            self.input_editor.setEnabled(not busy)
+            self.send_button.setEnabled(not busy)
+            self.stop_button.setEnabled(busy)
+            self.status_label.setText(status)
+
+        def _send_message(self) -> None:
+            if self._busy:
+                return
+            message = self.input_editor.toPlainText().strip()
+            if not message:
+                QMessageBox.warning(self, "Notes Required", "Paste notes or answer the current questions.")
+                self.input_editor.setFocus()
+                return
+            if shutil.which("codex") is None:
+                QMessageBox.critical(self, "Codex CLI Not Found", "The `codex` command is not available on PATH.")
+                return
+
+            self.input_editor.clear()
+            self._messages.append({"role": "user", "content": message})
+            self._append_message("You", message)
+            self._start_agent_turn()
+
+        def _artifact_dir(self) -> Path:
+            root = Path(self.active_config["artifact_dir"]) / "ticket-development"
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            candidate = root / stamp
+            suffix = 2
+            while candidate.exists():
+                candidate = root / "{0}-{1}".format(stamp, suffix)
+                suffix += 1
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+
+        def _codex_command(self, last_message_path: Path) -> List[str]:
+            codex_config = self.active_config.get("codex", {})
+            model_config = self.active_config.get("models", {})
+            command = [
+                "codex",
+                "-a",
+                str(codex_config.get("ask_for_approval", "never")),
+            ]
+            reasoning_effort = _configured_reasoning_effort(self.active_config, "planner")
+            if reasoning_effort:
+                command.extend(["-c", "model_reasoning_effort={0}".format(reasoning_effort)])
+            command.extend(
+                [
+                    "exec",
+                    "-",
+                    "-C",
+                    str(self.active_config["repo_root"]),
+                    "-m",
+                    str(model_config.get("planner", "gpt-5.4")),
+                    "--sandbox",
+                    str(codex_config.get("sandbox", "workspace-write")),
+                    "--color",
+                    str(codex_config.get("color", "never")),
+                    "--json",
+                    "-o",
+                    str(last_message_path),
+                ]
+            )
+            if codex_config.get("ephemeral", True):
+                command.append("--ephemeral")
+            if codex_config.get("skip_git_repo_check", True):
+                command.append("--skip-git-repo-check")
+            schema_path = _ticket_development_schema_path()
+            if schema_path.exists():
+                command.extend(["--output-schema", str(schema_path)])
+            return command
+
+        def _start_agent_turn(self) -> None:
+            artifact_dir = self._artifact_dir()
+            self._last_message_path = artifact_dir / "ticket-development.last_message.json"
+            self._stdout_buffer = ""
+            self._stderr_text = ""
+            self._agent_message_text = ""
+
+            prompt = _build_ticket_development_prompt(
+                Path(self.active_config["repo_root"]),
+                self.board_titles,
+                self.phase_order,
+                self._messages,
+            )
+            (artifact_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+
+            process = QProcess(self)
+            self._process = process
+            command = self._codex_command(self._last_message_path)
+            process.setProgram(command[0])
+            process.setArguments(command[1:])
+            process.setWorkingDirectory(str(self.active_config["repo_root"]))
+            process.started.connect(lambda current_prompt=prompt: self._write_prompt(current_prompt))
+            process.readyReadStandardOutput.connect(self._read_stdout)
+            process.readyReadStandardError.connect(self._read_stderr)
+            process.finished.connect(self._agent_finished)
+            process.errorOccurred.connect(self._agent_process_error)
+            self._append_system("Ticket developer started.")
+            self._set_busy(True, "Agent working...")
+            process.start()
+
+        def _write_prompt(self, prompt: str) -> None:
+            if self._process is None:
+                return
+            self._process.write(prompt.encode("utf-8"))
+            self._process.closeWriteChannel()
+
+        def _read_stdout(self) -> None:
+            if self._process is None:
+                return
+            chunk = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+            self._stdout_buffer += chunk
+            while "\n" in self._stdout_buffer:
+                line, self._stdout_buffer = self._stdout_buffer.split("\n", 1)
+                self._handle_stdout_line(line.strip())
+
+        def _read_stderr(self) -> None:
+            if self._process is None:
+                return
+            self._stderr_text += bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
+
+        def _handle_stdout_line(self, line: str) -> None:
+            if not line:
+                return
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                self._append_system(line)
+                return
+            if not isinstance(event, dict):
+                return
+            event_type = str(event.get("type", ""))
+            if event_type == "thread.started":
+                self._append_system("Agent session started.")
+                return
+            if event_type == "turn.started":
+                self._append_system("Agent is analysing the notes.")
+                return
+
+            item = event.get("item", {})
+            if not isinstance(item, dict):
+                return
+            item_type = str(item.get("type", ""))
+            if item_type == "command_execution" and event_type == "item.started":
+                command = str(item.get("command", "")).strip()
+                if command:
+                    self._append_system("Inspecting repo: {0}".format(command))
+                return
+            if item_type == "todo_list" and event_type == "item.updated":
+                items = item.get("items", [])
+                if isinstance(items, list):
+                    remaining = [
+                        str(entry.get("text", "")).strip()
+                        for entry in items
+                        if isinstance(entry, dict) and not entry.get("completed") and str(entry.get("text", "")).strip()
+                    ]
+                    if remaining:
+                        self.status_label.setText(remaining[0])
+                return
+            if item_type == "agent_message" and event_type == "item.completed":
+                self._agent_message_text = str(item.get("text", "")).strip()
+
+        def _agent_process_error(self, _error: Any) -> None:
+            if self._process is None:
+                return
+            self._append_system("Agent process error: {0}".format(self._process.errorString()))
+            if self._process.state() == QProcess.NotRunning:
+                self._set_busy(False)
+                self._process = None
+
+        def _agent_finished(self, exit_code: int, _exit_status: Any) -> None:
+            if self._stdout_buffer.strip():
+                self._handle_stdout_line(self._stdout_buffer.strip())
+            self._stdout_buffer = ""
+            self._set_busy(False)
+            self._process = None
+
+            raw_text = self._agent_message_text
+            if self._last_message_path is not None and self._last_message_path.exists():
+                raw_text = self._last_message_path.read_text(encoding="utf-8")
+
+            if int(exit_code) != 0:
+                detail = self._stderr_text.strip() or raw_text.strip() or "No error detail was emitted."
+                self._append_system("Ticket developer failed with exit code {0}.\n{1}".format(exit_code, detail))
+                return
+
+            payload = _ticket_development_payload_from_text(raw_text)
+            self._handle_agent_payload(payload, raw_text)
+            self.input_editor.setFocus()
+
+        def _handle_agent_payload(self, payload: Dict[str, Any], raw_text: str) -> None:
+            message = str(payload.get("message", "")).strip()
+            questions = [str(item).strip() for item in payload.get("questions", []) if str(item).strip()]
+            tickets = [item for item in payload.get("tickets", []) if isinstance(item, dict)]
+
+            visible_parts = []
+            if message:
+                visible_parts.append(message)
+            if questions:
+                visible_parts.append("\n".join("- {0}".format(question) for question in questions))
+            visible_text = "\n\n".join(visible_parts).strip()
+            if not visible_text and raw_text.strip():
+                visible_text = raw_text.strip()
+            if visible_text:
+                self._messages.append({"role": "assistant", "content": visible_text})
+                self._append_message("Agent", visible_text)
+
+            created_tasks = self._create_tickets(tickets)
+            if created_tasks:
+                lines = [
+                    "{0} [{1}] {2}".format(task.task_id, task.phase, task.title)
+                    for task in created_tasks
+                ]
+                self._append_system("Created cards:\n{0}".format("\n".join(lines)))
+                self._on_tickets_created(created_tasks)
+
+        def _create_tickets(self, tickets: List[Dict[str, Any]]) -> List[StoredTask]:
+            created_tasks: List[StoredTask] = []
+            for ticket in tickets:
+                title = str(ticket.get("title", "")).strip()
+                if not title:
+                    continue
+                board_title = str(ticket.get("board_title", "")).strip() or str(
+                    self.active_config.get("store", {}).get("default_board", "General")
+                )
+                phase = str(ticket.get("phase", "")).strip().lower()
+                complexity = str(ticket.get("complexity", "")).strip().lower()
+                if complexity == "complex" or phase == "planning":
+                    target_phase = "planning"
+                else:
+                    target_phase = "ready"
+                if target_phase not in self.phase_order:
+                    target_phase = "backlog"
+                context_notes = str(ticket.get("context_notes", "")).strip()
+                file_targets = [str(item).strip() for item in ticket.get("file_targets", []) if str(item).strip()]
+                acceptance = [str(item).strip() for item in ticket.get("acceptance", []) if str(item).strip()]
+                task = create_task(
+                    self.active_config,
+                    board_title=board_title,
+                    title=title,
+                    context_notes=context_notes,
+                    file_targets=file_targets,
+                    acceptance=acceptance,
+                    phase=target_phase,
+                )
+                if target_phase == "ready":
+                    plan = _normalise_ticket_plan(ticket)
+                    task = update_task_fields(
+                        self.active_config,
+                        task.task_id,
+                        plan_status="ready",
+                        plan=plan,
+                        file_targets=plan.get("relevant_files", file_targets),
+                        acceptance=acceptance,
+                        last_result_status="planned",
+                        last_summary=str(plan.get("summary", title)).strip(),
+                        last_error="",
+                    ) or task
+                created_tasks.append(task)
+            return created_tasks
+
+        def _stop_agent(self) -> None:
+            if self._process is None:
+                return
+            self._append_system("Stopping ticket developer.")
+            self._process.terminate()
+
+        def reject(self) -> None:
+            if self._process is not None:
+                self._process.terminate()
+            super().reject()
 
     class SettingsDialog(CommandEnterDialog):
         def __init__(self, active_config: Dict[str, Any], parent: QWidget | None = None) -> None:
@@ -3478,6 +4018,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self.add_task_button.setMaximumWidth(84)
             board_header_layout.addWidget(self.add_task_button)
 
+            self.develop_tickets_button = QPushButton("Develop Tickets")
+            self.develop_tickets_button.clicked.connect(self._open_ticket_development_dialog)
+            board_header_layout.addWidget(self.develop_tickets_button)
+
             refresh_button = QPushButton("Refresh")
             refresh_button.clicked.connect(self.refresh_view)
             board_header_layout.addWidget(refresh_button)
@@ -3746,6 +4290,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             QLineEdit,
             QPlainTextEdit,
+            QTextEdit#TicketChatTranscript,
             QListWidget,
             QSpinBox,
             QDialog#AppDialog QToolButton#DialogDropdown,
@@ -3759,6 +4304,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
             QLineEdit:focus,
             QPlainTextEdit:focus,
+            QTextEdit#TicketChatTranscript:focus,
             QListWidget:focus,
             QSpinBox:focus,
             QDialog#AppDialog QToolButton#DialogDropdown:focus,
@@ -4958,6 +5504,30 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 self.refresh_view()
 
             self._show_modeless_dialog(dialog, accept_task)
+
+        def _open_ticket_development_dialog(self) -> None:
+            board_titles = self._available_board_titles()
+            active_config = self.active_config
+
+            def handle_created(tasks: List[StoredTask]) -> None:
+                if tasks:
+                    self.selected_board_id = tasks[-1].board_id
+                    self.status_note = "Developed {0} ticket{1}".format(
+                        len(tasks),
+                        "" if len(tasks) == 1 else "s",
+                    )
+                self._persist_session(Path(active_config["repo_root"]))
+                self._activate_repo_config(Path(active_config["repo_root"]))
+                self.refresh_view()
+
+            dialog = TicketDevelopmentDialog(
+                active_config,
+                board_titles,
+                list(self.phase_order),
+                handle_created,
+                self,
+            )
+            self._show_modeless_dialog(dialog, lambda: None)
 
         def _open_edit_task_dialog(self, task: StoredTask) -> None:
             active_config = self.active_config

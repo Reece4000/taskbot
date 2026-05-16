@@ -55,6 +55,8 @@ from taskbot.ui import (
     _task_move_targets,
     _terminal_text_should_refresh,
     _taskbot_title_html,
+    _ticket_development_payload_from_text,
+    _normalise_ticket_plan,
     launch_ui,
     _sync_dialog_board_titles,
     _sync_task_card_footer_heights,
@@ -254,6 +256,45 @@ class TaskbotBehaviourTests(unittest.TestCase):
                 '<span style="color:#5f8f3a;">T</span>'
             ),
         )
+
+    def test_ticket_development_payload_parses_json_from_agent_text(self) -> None:
+        payload = _ticket_development_payload_from_text(
+            """
+            ```json
+            {
+              "message": "I found one clear ticket.",
+              "questions": ["Which browser should be targeted?"],
+              "tickets": [
+                {
+                  "board_title": "UI",
+                  "title": "Add develop tickets button",
+                  "phase": "ready"
+                }
+              ]
+            }
+            ```
+            """
+        )
+
+        self.assertEqual(payload["message"], "I found one clear ticket.")
+        self.assertEqual(payload["questions"], ["Which browser should be targeted?"])
+        self.assertEqual(payload["tickets"][0]["title"], "Add develop tickets button")
+
+    def test_normalise_ticket_plan_falls_back_to_executable_plan_shape(self) -> None:
+        plan = _normalise_ticket_plan(
+            {
+                "title": "Add develop tickets button",
+                "context_notes": "Open a chat window from the board header.",
+                "file_targets": ["taskbot/ui.py"],
+                "acceptance": ["Board header has a Develop Tickets button."],
+            }
+        )
+
+        self.assertEqual(plan["summary"], "Add develop tickets button")
+        self.assertEqual(plan["relevant_files"], ["taskbot/ui.py"])
+        self.assertEqual(plan["steps"][0]["files"], ["taskbot/ui.py"])
+        self.assertEqual(plan["verification"], ["Board header has a Develop Tickets button."])
+        self.assertFalse(plan["decomposition"]["should_split"])
 
     def test_board_summary_text_for_selected_board_uses_phase_counts(self) -> None:
         planning_task = self._example_stored_task()

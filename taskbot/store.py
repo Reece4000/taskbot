@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from taskbot.config import save_config_overrides
+from taskbot.terminal_stream import append_terminal_log
 
 
 STORE_VERSION = 1
@@ -70,6 +71,42 @@ def _task_status_from_phase(phase: str) -> str:
     if phase == "needs_testing":
         return "needs_testing"
     return "pending"
+
+
+def _compact_log_text(text: str, limit: int = 96) -> str:
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _phase_move_log_line(task_id: str,
+                         title: str,
+                         old_phase: str,
+                         new_phase: str,
+                         summary: str = "") -> str:
+    old_label = old_phase.replace("_", " ")
+    new_label = new_phase.replace("_", " ")
+    parts = [
+        "[taskbot] moved {0} {1}->{2}: {3}".format(
+            _compact_log_text(task_id, 48),
+            old_label,
+            new_label,
+            _compact_log_text(title or "Untitled task"),
+        )
+    ]
+    if new_phase == "needs_testing":
+        parts.append("done: {0}".format(_compact_log_text(summary or "no summary recorded")))
+    return "; ".join(parts)
+
+
+def _append_phase_move_log(config: Dict[str, Any], line: str) -> None:
+    if not line:
+        return
+    try:
+        append_terminal_log(config, line)
+    except OSError:
+        return
 
 
 def _normalise_agent_output_entry(payload: Any) -> Optional[Dict[str, Any]]:
@@ -802,9 +839,10 @@ def edit_task(config: Dict[str, Any],
               context_notes: str,
               phase: str) -> Optional[StoredTask]:
     updated: Optional[StoredTask] = None
+    move_log_line = ""
 
     def mutate(store: Dict[str, Any]) -> None:
-        nonlocal updated
+        nonlocal updated, move_log_line
         cleaned_board = board_title.strip() or str(config.get("store", {}).get("default_board", "General"))
         cleaned_title = title.strip()
         cleaned_phase = phase.strip()
@@ -820,16 +858,21 @@ def edit_task(config: Dict[str, Any],
                 continue
 
             board_id = _ensure_board(store, cleaned_board, len(store.get("boards", [])))
+            old_phase = str(payload.get("phase", ""))
+            summary = str(payload.get("last_summary", ""))
             payload["board_id"] = board_id
             payload["board_title"] = cleaned_board
             payload["title"] = cleaned_title
             payload["context_notes"] = context_notes.strip()
             payload["phase"] = cleaned_phase
             payload["updated_at"] = _now_iso()
+            if old_phase and old_phase != cleaned_phase:
+                move_log_line = _phase_move_log_line(task_id, cleaned_title, old_phase, cleaned_phase, summary)
             updated = StoredTask.from_payload(payload)
             break
 
     _mutate_store(config, mutate)
+    _append_phase_move_log(config, move_log_line)
     return updated
 
 
@@ -973,16 +1016,45 @@ def update_task_phase(config: Dict[str, Any],
                       last_result_status: Optional[str] = None,
                       last_summary: Optional[str] = None,
                       last_error: Optional[str] = None) -> Optional[StoredTask]:
-    fields: Dict[str, Any] = {"phase": phase}
-    if artifact_dir is not None:
-        fields["artifact_dir"] = artifact_dir
-    if last_result_status is not None:
-        fields["last_result_status"] = last_result_status
-    if last_summary is not None:
-        fields["last_summary"] = last_summary
-    if last_error is not None:
-        fields["last_error"] = last_error
-    return update_task_fields(config, task_id, **fields)
+    updated: Optional[StoredTask] = None
+    move_log_line = ""
+    cleaned_phase = phase.strip()
+
+    def mutate(store: Dict[str, Any]) -> None:
+        nonlocal updated, move_log_line
+        for payload in store.get("tasks", []):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("task_id", "")) != task_id:
+                continue
+
+            old_phase = str(payload.get("phase", ""))
+            payload["phase"] = cleaned_phase
+            if artifact_dir is not None:
+                payload["artifact_dir"] = artifact_dir
+            if last_result_status is not None:
+                payload["last_result_status"] = last_result_status
+            if last_summary is not None:
+                payload["last_summary"] = last_summary
+            if last_error is not None:
+                payload["last_error"] = last_error
+            payload["updated_at"] = _now_iso()
+
+            if old_phase and old_phase != cleaned_phase:
+                summary = last_summary if last_summary is not None else str(payload.get("last_summary", ""))
+                move_log_line = _phase_move_log_line(
+                    task_id,
+                    str(payload.get("title", "")),
+                    old_phase,
+                    cleaned_phase,
+                    str(summary or ""),
+                )
+            updated = StoredTask.from_payload(payload)
+            break
+
+    _mutate_store(config, mutate)
+    _append_phase_move_log(config, move_log_line)
+    return updated
 
 
 def phase_labels(config: Dict[str, Any]) -> List[str]:

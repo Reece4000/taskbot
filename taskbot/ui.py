@@ -1451,6 +1451,16 @@ def _task_move_targets(current_phase: str, phase_order: List[str]) -> List[str]:
     return [phase for phase in phase_order if phase != current_phase]
 
 
+def _task_board_recency_sort_key(task: StoredTask) -> tuple[str, str, int, str]:
+    updated_at = str(task.updated_at or "").strip()
+    created_at = str(task.created_at or "").strip()
+    return (updated_at or created_at, created_at, int(task.order), task.task_id)
+
+
+def _sort_board_phase_tasks(tasks: List[StoredTask]) -> List[StoredTask]:
+    return sorted(tasks, key=_task_board_recency_sort_key, reverse=True)
+
+
 def _create_form_dropdown_class(*,
                                 Qt: Any,
                                 QAction: Any,
@@ -6055,7 +6065,7 @@ def launch_ui(config: Dict[str, Any]) -> int:
             visible_tasks = self._visible_board_tasks(tasks)
 
             for phase in self.phase_order:
-                phase_tasks = [task for task in visible_tasks if task.phase == phase]
+                phase_tasks = _sort_board_phase_tasks([task for task in visible_tasks if task.phase == phase])
                 self.phase_columns[phase].set_tasks(
                     phase_tasks,
                     phase_order=self.phase_order,

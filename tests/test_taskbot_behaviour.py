@@ -29,8 +29,10 @@ from taskbot.store import (
     edit_task,
     load_store_snapshot,
     rename_board as rename_store_board,
+    update_task_phase,
     update_task_fields,
 )
+from taskbot.terminal_stream import terminal_log_path
 from taskbot.ui import (
     START_LOOP_DIALOG_DEFAULT_ITERATIONS,
     _board_header_title,
@@ -52,6 +54,7 @@ from taskbot.ui import (
     _repo_agents_path,
     _start_task_run_args,
     _start_loop_run_args,
+    _sort_board_phase_tasks,
     _task_card_can_start_task,
     _task_move_targets,
     _terminal_text_should_refresh,
@@ -343,6 +346,63 @@ class TaskbotBehaviourTests(unittest.TestCase):
             _task_move_targets("in_progress", ["backlog", "planning", "in_progress", "completed"]),
             ["backlog", "planning", "completed"],
         )
+
+    def test_board_phase_tasks_sort_newest_updates_first(self) -> None:
+        older = self._example_stored_task()
+        older.task_id = "engineering-older"
+        older.order = 0
+        older.created_at = "2026-01-01T09:00:00"
+        older.updated_at = "2026-01-01T09:10:00"
+
+        newer_created = self._example_stored_task()
+        newer_created.task_id = "engineering-newer-created"
+        newer_created.order = 1
+        newer_created.created_at = "2026-01-01T09:05:00"
+        newer_created.updated_at = "2026-01-01T09:05:00"
+
+        moved_later = self._example_stored_task()
+        moved_later.task_id = "engineering-moved-later"
+        moved_later.order = 2
+        moved_later.created_at = "2026-01-01T08:00:00"
+        moved_later.updated_at = "2026-01-01T09:20:00"
+
+        self.assertEqual(
+            [task.task_id for task in _sort_board_phase_tasks([older, newer_created, moved_later])],
+            ["engineering-moved-later", "engineering-older", "engineering-newer-created"],
+        )
+
+    def test_update_task_phase_refreshes_timestamp_and_logs_move_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+
+            with patch(
+                "taskbot.store._now_iso",
+                side_effect=[
+                    "2026-01-01T10:00:00",
+                    "2026-01-01T10:00:00",
+                    "2026-01-01T10:05:00",
+                ],
+            ):
+                task = create_task(config, board_title="General", title="Add import preview")
+                updated = update_task_phase(
+                    config,
+                    task.task_id,
+                    "needs_testing",
+                    last_summary="Added the preview panel and wired import validation.",
+                )
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated.updated_at, "2026-01-01T10:05:00")
+
+            log_path = terminal_log_path(config)
+            self.assertTrue(log_path.exists())
+            self.assertIn(
+                "[taskbot] moved {0} backlog->needs testing: Add import preview; done: Added the preview panel and wired import validation.".format(
+                    task.task_id
+                ),
+                log_path.read_text(encoding="utf-8"),
+            )
 
     def test_rename_store_board_keeps_empty_board_identity_stable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

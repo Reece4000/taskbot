@@ -101,6 +101,7 @@ The desktop UI provides:
 - a left-side board list with quick board creation
 - centered workflow columns in the middle, with drag-and-drop cards that can move back to backlog or forward into later stages
 - a compact add-task button that opens a non-blocking dialog
+- a `Develop Tickets` action that opens an interactive Codex terminal session for turning rough notes into ready or planning cards
 - click-to-edit task cards for changing the board, phase, title, and context notes
 - runner controls for planning and execution, including a Start Loop dialog for indefinite or fixed-length runs
 - a settings dialog for sandbox/approval policy, default models, reasoning effort, tiny-task fast path, verification policy, and git publishing

@@ -20,6 +20,7 @@ from taskbot.runner import (
     _cmd_doctor,
     _run_task_once,
     _should_fast_path_tiny_task,
+    main as runner_main,
 )
 from taskbot.store import (
     StoredTask,
@@ -386,6 +387,46 @@ class TaskbotBehaviourTests(unittest.TestCase):
             self.assertEqual(store["tasks"], [])
             persisted = json.loads(Path(config["store"]["path"]).read_text(encoding="utf-8"))
             self.assertEqual(persisted["tasks"], [])
+
+    def test_add_task_cli_can_create_ready_task_with_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = runner_main(
+                    [
+                        "--repo-root",
+                        str(repo_root),
+                        "add-task",
+                        "--board",
+                        "UI",
+                        "--title",
+                        "Add interactive ticket developer",
+                        "--phase",
+                        "ready",
+                        "--ready-plan",
+                        "--context",
+                        "Open an interactive Codex session for ticket development.",
+                        "--file-target",
+                        "taskbot/ui.py",
+                        "--acceptance",
+                        "The created card can run without a planning pass.",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            config = load_config(repo_root, None, app_root=Path.cwd())
+            tasks = load_store_snapshot(config)["tasks"]
+            self.assertEqual(len(tasks), 1)
+            task = StoredTask.from_payload(tasks[0])
+            self.assertEqual(task.board_title, "UI")
+            self.assertEqual(task.phase, "ready")
+            self.assertEqual(task.plan_status, "ready")
+            self.assertEqual(task.file_targets, ["taskbot/ui.py"])
+            self.assertEqual(task.acceptance, ["The created card can run without a planning pass."])
+            self.assertIn("taskbot/ui.py", task.plan["relevant_files"])
+            self.assertIn("ready", output.getvalue())
 
     def test_load_store_snapshot_normalises_legacy_markdown_source_kind_to_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -80,6 +80,7 @@ RUNNER_CONTROL_TOOLTIPS = {
     "start_loop": "Keep running full task passes until you press Stop.",
     "stop": "Request the active runner to stop after the current phase finishes.",
 }
+TICKET_DEVELOPMENT_TURN_TIMEOUT_MS = 90_000
 
 ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 ANSI_FG_COLORS = {
@@ -723,6 +724,54 @@ def _launch_terminal(repo_root: Path) -> tuple[bool, str]:
     return (True, "")
 
 
+def _launch_terminal_command(repo_root: Path, shell_command: str) -> tuple[bool, str]:
+    resolved_repo = repo_root.resolve()
+    command: Optional[List[str]] = None
+    cleaned_command = str(shell_command).strip()
+    if not cleaned_command:
+        return (False, "No terminal command was provided.")
+
+    if sys.platform == "darwin":
+        script = 'tell application "Terminal"\nactivate\ndo script {0}\nend tell'.format(
+            json.dumps(cleaned_command)
+        )
+        command = ["osascript", "-e", script]
+    elif sys.platform.startswith("win"):
+        command = ["cmd.exe", "/K", cleaned_command]
+    else:
+        shell_parts = ["bash", "-lc", cleaned_command]
+        terminal_specs = (
+            ("gnome-terminal", ["--", *shell_parts]),
+            ("konsole", ["-e", *shell_parts]),
+            ("xfce4-terminal", ["--command", shlex.join(shell_parts)]),
+            ("kitty", [*shell_parts]),
+            ("alacritty", ["-e", *shell_parts]),
+            ("wezterm", ["start", "--cwd", str(resolved_repo), "--", *shell_parts]),
+            ("xterm", ["-e", *shell_parts]),
+            ("x-terminal-emulator", ["-e", *shell_parts]),
+        )
+        for executable_name, args in terminal_specs:
+            executable = shutil.which(executable_name)
+            if executable:
+                command = [executable, *args]
+                break
+
+    if not command:
+        return (False, "No supported terminal launcher was found on this platform.")
+
+    try:
+        subprocess.Popen(
+            command,
+            cwd=resolved_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return (False, str(exc))
+    return (True, "")
+
+
 def _repo_agents_path(repo_root: Path) -> Path:
     resolved_repo = repo_root.resolve()
     for candidate_name in ("agents.md", "AGENTS.md"):
@@ -766,12 +815,16 @@ def _build_ticket_development_prompt(
     return """You are Taskbot's ticket development agent.
 
 Your job is to turn messy user notes into concrete execution tickets for a repo-local Codex implementation loop.
-You may inspect the repository when that helps clarify likely files, existing behaviour, naming, or constraints.
+This is a short ticket-development turn, not an implementation or deep planning run.
 
 Conversation and repo context:
 {payload}
 
 Operating rules:
+- Prefer asking clarifying questions quickly over doing extended investigation.
+- Do not try to resolve every ambiguity from the repo. If expectations are unclear, return questions now.
+- Keep repo inspection surgical: at most 3 targeted searches or file reads, only when needed to name likely files or verify existing behaviour.
+- Do not run broad scans, tests, builds, package installs, servers, or long commands.
 - Be methodical. Extract multiple tickets when the notes contain multiple independent changes.
 - Ask targeted follow-up questions when expectations, behaviour, constraints, or acceptance criteria are unclear.
 - If a ticket is clear enough to implement, include it in `tickets`.
@@ -786,9 +839,138 @@ Operating rules:
 - For `ready` tickets, include an implementation `plan` matching Taskbot's plan shape. Keep it concise but actionable.
 - For `planning` tickets, omit the plan or set it to null.
 - Do not edit files and do not modify Taskbot's task store.
+- Complete this turn promptly. If more than a small amount of repo inspection seems necessary, ask the user which direction to take.
 
 Return JSON only. Do not wrap it in Markdown.
 """.format(payload=json.dumps(payload, indent=2))
+
+
+def _build_interactive_ticket_development_prompt(
+    repo_root: Path,
+    board_titles: List[str],
+    phase_order: List[str],
+    taskbot_entry: Path,
+    python_executable: str,
+) -> str:
+    cleaned_boards = [str(item).strip() for item in board_titles if str(item).strip()]
+    if not cleaned_boards:
+        cleaned_boards = ["General"]
+    cleaned_phases = [str(item).strip() for item in phase_order if str(item).strip()]
+    if not cleaned_phases:
+        cleaned_phases = ["backlog", "planning", "ready", "in_progress", "needs_testing", "blocked", "completed"]
+    add_task_prefix = shlex.join(
+        [
+            python_executable,
+            str(taskbot_entry.resolve()),
+            "--repo-root",
+            str(repo_root.resolve()),
+            "add-task",
+        ]
+    )
+    return """You are Taskbot's interactive ticket development agent.
+
+Help the user turn messy notes into concrete Taskbot cards. This is an interactive terminal session, so ask questions directly whenever expectations, requirements, scope, or acceptance criteria are unclear.
+
+Repository root:
+{repo_root}
+
+Existing board names:
+{boards}
+
+Workflow phases:
+{phases}
+
+Create cards only through this supported CLI command:
+{add_task_prefix} --board "Board" --title "Imperative title" --context "Concrete notes" --acceptance "Observable criterion"
+
+Use these creation rules:
+- Simple, well-specified tickets should go straight to execution:
+  {add_task_prefix} --board "Board" --title "Title" --phase ready --ready-plan --context "..." --file-target path/to/file --acceptance "..."
+- Complex, broad, or risky tickets should go to planning:
+  {add_task_prefix} --board "Board" --title "Title" --phase planning --context "..." --acceptance "..."
+- Repeat --file-target and --acceptance as needed.
+- Ask before creating a card if the desired behavior, constraints, or success criteria are ambiguous.
+- You may inspect the repo surgically to clarify likely files or existing behavior. Do not implement code in this session.
+- Do not hand-edit _taskbot/tasks.yaml.
+- After creating cards, summarize what was created and which ones will run directly.
+
+Start by asking the user to paste their disorganized notes.
+""".format(
+        repo_root=str(repo_root.resolve()),
+        boards="\n".join("- {0}".format(item) for item in cleaned_boards),
+        phases=", ".join(cleaned_phases),
+        add_task_prefix=add_task_prefix,
+    )
+
+
+def _write_interactive_ticket_development_script(
+    active_config: Dict[str, Any],
+    *,
+    board_titles: List[str],
+    phase_order: List[str],
+    taskbot_entry: Path,
+) -> Path:
+    repo_root = Path(active_config["repo_root"]).resolve()
+    artifact_root = Path(active_config["artifact_dir"]) / "ticket-development"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    artifact_dir = artifact_root / "interactive-{0}".format(stamp)
+    suffix = 2
+    while artifact_dir.exists():
+        artifact_dir = artifact_root / "interactive-{0}-{1}".format(stamp, suffix)
+        suffix += 1
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt = _build_interactive_ticket_development_prompt(
+        repo_root,
+        board_titles,
+        phase_order,
+        taskbot_entry,
+        sys.executable,
+    )
+    prompt_path = artifact_dir / "prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    codex_config = active_config.get("codex", {})
+    model_config = active_config.get("models", {})
+    command = [
+        "codex",
+        "-a",
+        str(codex_config.get("ask_for_approval", "on-request")),
+    ]
+    reasoning_effort = _configured_reasoning_effort(active_config, "planner")
+    if reasoning_effort:
+        command.extend(["-c", "model_reasoning_effort={0}".format(reasoning_effort)])
+    command.extend(
+        [
+            "-C",
+            str(repo_root),
+            "-m",
+            str(model_config.get("planner", "gpt-5.4")),
+            "--sandbox",
+            str(codex_config.get("sandbox", "workspace-write")),
+            "--color",
+            str(codex_config.get("color", "auto")),
+        ]
+    )
+    command_text = shlex.join(command)
+    script_path = artifact_dir / "start-ticket-developer.sh"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/bin/zsh",
+                "cd {0}".format(shlex.quote(str(repo_root))),
+                "clear",
+                "echo 'Taskbot interactive ticket developer'",
+                "echo 'Paste your notes after Codex starts. Created cards will appear on the board.'",
+                "echo",
+                "exec {0} \"$(<{1})\"".format(command_text, shlex.quote(str(prompt_path))),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+    return script_path
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
@@ -2409,6 +2591,10 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._stderr_text = ""
             self._agent_message_text = ""
             self._last_message_path: Path | None = None
+            self._turn_timer = QTimer(self)
+            self._turn_timer.setSingleShot(True)
+            self._turn_timer.timeout.connect(self._agent_turn_timed_out)
+            self._turn_timed_out = False
             self._busy = False
 
             self.setObjectName("AppDialog")
@@ -2593,6 +2779,8 @@ def launch_ui(config: Dict[str, Any]) -> int:
             self._append_system("Ticket developer started.")
             self._set_busy(True, "Agent working...")
             process.start()
+            self._turn_timed_out = False
+            self._turn_timer.start(TICKET_DEVELOPMENT_TURN_TIMEOUT_MS)
 
         def _write_prompt(self, prompt: str) -> None:
             if self._process is None:
@@ -2660,15 +2848,42 @@ def launch_ui(config: Dict[str, Any]) -> int:
                 return
             self._append_system("Agent process error: {0}".format(self._process.errorString()))
             if self._process.state() == QProcess.NotRunning:
+                self._turn_timer.stop()
                 self._set_busy(False)
                 self._process = None
 
+        def _agent_turn_timed_out(self) -> None:
+            if self._process is None:
+                return
+            if self._process.state() == QProcess.NotRunning:
+                return
+            self._turn_timed_out = True
+            self._append_system(
+                "Stopped this ticket-development turn after {0} seconds. Ask a narrower question or paste the most important notes first.".format(
+                    TICKET_DEVELOPMENT_TURN_TIMEOUT_MS // 1000
+                )
+            )
+            self._process.terminate()
+            QTimer.singleShot(3000, self._kill_timed_out_agent)
+
+        def _kill_timed_out_agent(self) -> None:
+            if self._process is None:
+                return
+            if self._process.state() != QProcess.NotRunning:
+                self._process.kill()
+
         def _agent_finished(self, exit_code: int, _exit_status: Any) -> None:
+            self._turn_timer.stop()
             if self._stdout_buffer.strip():
                 self._handle_stdout_line(self._stdout_buffer.strip())
             self._stdout_buffer = ""
             self._set_busy(False)
             self._process = None
+
+            if self._turn_timed_out:
+                self._turn_timed_out = False
+                self.input_editor.setFocus()
+                return
 
             raw_text = self._agent_message_text
             if self._last_message_path is not None and self._last_message_path.exists():
@@ -5507,27 +5722,26 @@ def launch_ui(config: Dict[str, Any]) -> int:
 
         def _open_ticket_development_dialog(self) -> None:
             board_titles = self._available_board_titles()
-            active_config = self.active_config
+            try:
+                script_path = _write_interactive_ticket_development_script(
+                    self.active_config,
+                    board_titles=board_titles,
+                    phase_order=list(self.phase_order),
+                    taskbot_entry=taskbot_entry,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Failed To Prepare Ticket Developer", str(exc))
+                return
 
-            def handle_created(tasks: List[StoredTask]) -> None:
-                if tasks:
-                    self.selected_board_id = tasks[-1].board_id
-                    self.status_note = "Developed {0} ticket{1}".format(
-                        len(tasks),
-                        "" if len(tasks) == 1 else "s",
-                    )
-                self._persist_session(Path(active_config["repo_root"]))
-                self._activate_repo_config(Path(active_config["repo_root"]))
-                self.refresh_view()
-
-            dialog = TicketDevelopmentDialog(
-                active_config,
-                board_titles,
-                list(self.phase_order),
-                handle_created,
-                self,
+            ok, error_text = _launch_terminal_command(
+                Path(self.active_config["repo_root"]),
+                shlex.quote(str(script_path)),
             )
-            self._show_modeless_dialog(dialog, lambda: None)
+            if not ok:
+                QMessageBox.critical(self, "Failed To Open Ticket Developer", error_text)
+                return
+            self.status_note = "Opened interactive ticket developer"
+            self.refresh_view()
 
         def _open_edit_task_dialog(self, task: StoredTask) -> None:
             active_config = self.active_config

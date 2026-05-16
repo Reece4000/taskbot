@@ -29,6 +29,7 @@ from taskbot.store import (
     phase_labels,
     select_next_task,
     store_path,
+    update_task_fields,
     update_task_phase,
 )
 from taskbot.terminal_stream import append_terminal_log, format_terminal_header, terminal_log_path
@@ -1246,13 +1247,62 @@ def _cmd_index(config: Dict[str, Any], args: argparse.Namespace) -> int:
     return 0
 
 
+def _manual_ready_plan(title: str,
+                       context_notes: str,
+                       file_targets: List[str],
+                       acceptance: List[str]) -> Dict[str, Any]:
+    details = context_notes.strip() or title.strip()
+    return {
+        "summary": title.strip(),
+        "constraints": [],
+        "relevant_files": list(file_targets),
+        "steps": [
+            {
+                "title": "Implement the ticket",
+                "details": details or "Make the requested change while preserving existing behaviour.",
+                "files": list(file_targets),
+                "parallelisable": False,
+            }
+        ],
+        "verification": list(acceptance),
+        "subagent_splits": [],
+        "decomposition": {
+            "should_split": False,
+            "reason": "",
+            "subtasks": [],
+        },
+    }
+
+
 def _cmd_add_task(config: Dict[str, Any], args: argparse.Namespace) -> int:
+    phase = str(args.phase or "").strip() or None
+    if phase is not None and phase not in phase_labels(config):
+        raise ValueError("invalid task phase: {0}".format(phase))
+    if args.ready_plan:
+        phase = "ready"
+
+    file_targets = [str(item).strip() for item in (args.file_target or []) if str(item).strip()]
+    acceptance = [str(item).strip() for item in (args.acceptance or []) if str(item).strip()]
     task = create_task(
         config,
         board_title=args.board,
         title=args.title,
         context_notes=args.context or "",
+        file_targets=file_targets,
+        acceptance=acceptance,
+        phase=phase,
     )
+    if task.phase == "ready":
+        plan = _manual_ready_plan(task.title, task.context_notes, task.file_targets, task.acceptance)
+        task = update_task_fields(
+            config,
+            task.task_id,
+            plan_status="ready",
+            plan=plan,
+            last_result_status="planned",
+            last_summary=str(plan.get("summary", task.title)),
+            last_error="",
+        ) or task
     print("{0} | {1} | {2} | {3}".format(task.task_id, task.phase, task.board_title, task.title))
     return 0
 
@@ -1460,6 +1510,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_task_cmd.add_argument("--board", default="General")
     add_task_cmd.add_argument("--title", required=True)
     add_task_cmd.add_argument("--context")
+    add_task_cmd.add_argument("--phase")
+    add_task_cmd.add_argument("--file-target", action="append", default=[])
+    add_task_cmd.add_argument("--acceptance", action="append", default=[])
+    add_task_cmd.add_argument(
+        "--ready-plan",
+        action="store_true",
+        help="Mark the task ready with a compact generated implementation plan.",
+    )
     add_task_cmd.set_defaults(func=_cmd_add_task)
 
     index_cmd = subparsers.add_parser("index")

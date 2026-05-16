@@ -11,13 +11,14 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from taskbot.codex_cli import CodexRunResult, _is_zero_match_search_failure, analyze_codex_failure
+from taskbot.codex_cli import CodexRunResult, _is_zero_match_search_failure, analyze_codex_failure, run_codex_exec
 from taskbot.config import DEFAULT_CONFIG, load_config, save_config_overrides
 from taskbot.git_integration import capture_git_session_state, publish_git_changes
 from taskbot.runner import (
     _approval_response_path as _runner_approval_response_path,
     _build_tiny_task_plan,
     _cmd_doctor,
+    _requeue_running_in_progress_tasks,
     _run_task_once,
     _should_fast_path_tiny_task,
     main as runner_main,
@@ -47,6 +48,7 @@ from taskbot.ui import (
     _install_command_enter_shortcuts,
     _checkbox_indicator_tick_icon_path,
     _trash_icon_path,
+    _codex_model_choices,
     RUNNER_CONTROL_TOOLTIPS,
     _config_path_label_for_header,
     _create_form_dropdown_class,
@@ -61,6 +63,7 @@ from taskbot.ui import (
     _taskbot_title_html,
     _ticket_development_payload_from_text,
     _normalise_ticket_plan,
+    _parse_codex_model_catalog,
     launch_ui,
     _sync_dialog_board_titles,
     _sync_task_card_footer_heights,
@@ -1541,6 +1544,56 @@ class TaskbotBehaviourTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = original_platform
 
+    def test_parse_codex_model_catalog_returns_visible_model_slugs(self) -> None:
+        catalog = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-5.5", "visibility": "list"},
+                    {"slug": "codex-auto-review", "visibility": "hide"},
+                    {"slug": "gpt-5.4", "visibility": "list"},
+                    {"slug": "gpt-5.5", "visibility": "list"},
+                    {"slug": "  ", "visibility": "list"},
+                    "not-a-model",
+                ]
+            }
+        )
+
+        self.assertEqual(_parse_codex_model_catalog(catalog), ["gpt-5.5", "gpt-5.4"])
+
+    def test_codex_model_choices_reads_codex_debug_catalog(self) -> None:
+        catalog = json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-5.5", "visibility": "list"},
+                    {"slug": "codex-auto-review", "visibility": "hide"},
+                    {"slug": "gpt-5.4-mini", "visibility": "list"},
+                ]
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            ["codex", "debug", "models"],
+            0,
+            stdout=catalog,
+            stderr="",
+        )
+
+        with patch("taskbot.ui.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "taskbot.ui.subprocess.run",
+            return_value=completed,
+        ) as run:
+            choices = _codex_model_choices(["fallback-model"])
+
+        self.assertEqual(choices, ["gpt-5.5", "gpt-5.4-mini"])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["codex", "debug", "models"])
+
+    def test_codex_model_choices_falls_back_when_discovery_fails(self) -> None:
+        with patch("taskbot.ui.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "taskbot.ui.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["codex", "debug", "models"], 5.0),
+        ):
+            self.assertEqual(_codex_model_choices(["fallback-model"]), ["fallback-model"])
+
     def test_task_card_footer_sync_allocates_wrapped_meta_height(self) -> None:
         original_platform = os.environ.get("QT_QPA_PLATFORM")
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -1893,6 +1946,127 @@ class TaskbotBehaviourTests(unittest.TestCase):
         self.assertTrue(analysis.permission_related)
         self.assertEqual(len(analysis.actionable_failures), 1)
         self.assertEqual(analysis.actionable_failures[0].command, "cat /root/secret.txt")
+
+    def test_run_task_once_stop_returns_active_task_to_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+            task = create_task(
+                config,
+                board_title="General",
+                title="Stop during implementation",
+                phase="ready",
+            )
+            task = update_task_fields(
+                config,
+                task.task_id,
+                plan_status="ready",
+                plan={"summary": "Existing implementation plan"},
+            ) or task
+            stop_path = Path(config["control_dir"]) / "stop"
+            stop_path.parent.mkdir(parents=True, exist_ok=True)
+            stop_path.write_text("stop requested\n", encoding="utf-8")
+
+            summary = _run_task_once(config, task, rebuild_index=False)
+
+            self.assertEqual(summary["status"], "stopped")
+            self.assertEqual(summary["mark_task_result"], "returned to ready")
+            snapshot = load_store_snapshot(config)
+            stored_task = next(
+                StoredTask.from_payload(payload)
+                for payload in snapshot["tasks"]
+                if payload["task_id"] == task.task_id
+            )
+            self.assertEqual(stored_task.phase, "ready")
+            self.assertEqual(stored_task.last_result_status, "stopped")
+            self.assertEqual(stored_task.last_error, "stopped by request")
+
+    def test_requeue_running_in_progress_tasks_only_recovers_runner_owned_cards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+            running_task = create_task(
+                config,
+                board_title="General",
+                title="Runner-owned active card",
+                phase="in_progress",
+            )
+            running_task = update_task_fields(
+                config,
+                running_task.task_id,
+                plan_status="ready",
+                plan={"summary": "Existing implementation plan"},
+                last_result_status="running",
+            ) or running_task
+            manual_task = create_task(
+                config,
+                board_title="General",
+                title="Manual in-progress card",
+                phase="in_progress",
+            )
+
+            requeued = _requeue_running_in_progress_tasks(config)
+
+            self.assertEqual([task.task_id for task in requeued], [running_task.task_id])
+            snapshot = load_store_snapshot(config)
+            tasks_by_id = {
+                payload["task_id"]: StoredTask.from_payload(payload)
+                for payload in snapshot["tasks"]
+            }
+            self.assertEqual(tasks_by_id[running_task.task_id].phase, "ready")
+            self.assertEqual(tasks_by_id[running_task.task_id].last_result_status, "stopped")
+            self.assertEqual(tasks_by_id[manual_task.task_id].phase, "in_progress")
+            self.assertEqual(tasks_by_id[manual_task.task_id].last_result_status, "")
+
+    def test_run_codex_exec_persists_exact_model_and_reasoning_command(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = iter(())
+                self.stderr = iter(())
+                self.returncode = 0
+                self.pid = 12345
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config = load_config(repo_root, None, app_root=repo_root)
+            config["codex"]["stream_output"] = False
+            config["codex"]["ask_for_approval"] = "on-request"
+            config["codex"]["sandbox"] = "workspace-write"
+            artifact_dir = repo_root / "_taskbot" / "artifacts" / "run"
+            schema_path = repo_root / "schema.json"
+            schema_path.write_text("{}", encoding="utf-8")
+
+            with patch("taskbot.codex_cli.subprocess.Popen", return_value=FakeProcess()) as popen:
+                result = run_codex_exec(
+                    repo_root,
+                    config,
+                    model="gpt-5.4",
+                    reasoning_effort="xhigh",
+                    prompt="Do the thing.",
+                    artifact_dir=artifact_dir,
+                    phase_name="implement",
+                    output_schema=schema_path,
+                )
+
+            command = popen.call_args.args[0]
+            self.assertEqual(command, result.command)
+            self.assertIn("-m", command)
+            self.assertEqual(command[command.index("-m") + 1], "gpt-5.4")
+            self.assertIn("-c", command)
+            self.assertIn("model_reasoning_effort=xhigh", command)
+
+            command_audit = json.loads((artifact_dir / "implement.command.json").read_text(encoding="utf-8"))
+            self.assertEqual(command_audit["model"], "gpt-5.4")
+            self.assertEqual(command_audit["reasoning_effort"], "xhigh")
+            self.assertEqual(command_audit["command"], command)
+            self.assertIn("-m gpt-5.4", command_audit["command_text"])
 
     def test_write_approval_response_uses_control_dir_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

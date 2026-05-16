@@ -70,6 +70,7 @@ REASONING_EFFORT_CHOICES = [
     "xhigh",
 ]
 REASONING_EFFORT_INHERIT_LABEL = "Inherit current Codex behavior"
+CODEX_MODEL_DISCOVERY_TIMEOUT_SECONDS = 5.0
 
 RUNNER_CONTROL_TOOLTIPS = {
     "plan_once": "Run the planner for the next runnable task once, then stop.",
@@ -81,6 +82,51 @@ RUNNER_CONTROL_TOOLTIPS = {
     "stop": "Request the active runner to stop after the current phase finishes.",
 }
 TICKET_DEVELOPMENT_TURN_TIMEOUT_MS = 90_000
+
+
+def _parse_codex_model_catalog(raw_catalog: str) -> List[str]:
+    try:
+        catalog = json.loads(raw_catalog)
+    except json.JSONDecodeError:
+        return []
+    models = catalog.get("models", [])
+    if not isinstance(models, list):
+        return []
+
+    choices: List[str] = []
+    seen = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        slug = str(model.get("slug", "")).strip()
+        if not slug or slug in seen:
+            continue
+        visibility = str(model.get("visibility", "list")).strip().lower()
+        if visibility != "list":
+            continue
+        choices.append(slug)
+        seen.add(slug)
+    return choices
+
+
+def _codex_model_choices(fallback: Optional[List[str]] = None) -> List[str]:
+    fallback_choices = list(MODEL_CHOICES if fallback is None else fallback)
+    if shutil.which("codex") is None:
+        return fallback_choices
+    try:
+        completed = subprocess.run(
+            ["codex", "debug", "models"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=CODEX_MODEL_DISCOVERY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return fallback_choices
+
+    discovered_choices = _parse_codex_model_catalog(completed.stdout)
+    return discovered_choices or fallback_choices
+
 
 ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 ANSI_FG_COLORS = {
@@ -3025,11 +3071,12 @@ def launch_ui(config: Dict[str, Any]) -> int:
             planning_config = active_config.get("planning", {})
             verification_config = active_config.get("verification", {})
             git_config = active_config.get("git", {})
+            codex_model_choices = _codex_model_choices()
 
             def _configure_model_dropdown(dropdown: Any, configured_value: Any, fallback_value: str) -> None:
                 raw_value = "" if configured_value is None else str(configured_value).strip()
                 selected_value = raw_value or fallback_value
-                model_options = list(MODEL_CHOICES)
+                model_options = list(codex_model_choices)
                 if selected_value and selected_value not in model_options:
                     model_options.insert(0, selected_value)
                 dropdown.addItems(model_options)

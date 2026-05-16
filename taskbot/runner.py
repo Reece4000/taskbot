@@ -600,6 +600,70 @@ def _stop_requested(config: Dict[str, Any]) -> bool:
     return _stop_path(config).exists()
 
 
+def _resume_phase_after_stop(previous_phase: str) -> str:
+    cleaned = str(previous_phase or "").strip()
+    if cleaned and cleaned != "in_progress":
+        return cleaned
+    return "ready"
+
+
+def _mark_task_stopped(config: Dict[str, Any],
+                       task: StoredTask,
+                       *,
+                       artifact_dir: Path,
+                       previous_phase: str,
+                       report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    resume_phase = _resume_phase_after_stop(previous_phase)
+    summary_text = "Stopped before completion."
+    stopped_task = update_task_phase(
+        config,
+        task.task_id,
+        resume_phase,
+        artifact_dir=str(artifact_dir),
+        last_result_status="stopped",
+        last_summary=summary_text,
+        last_error="stopped by request",
+    ) or task
+    summary: Dict[str, Any] = {
+        "task_id": stopped_task.task_id,
+        "status": "stopped",
+        "summary": summary_text,
+        "mark_task_result": "returned to {0}".format(resume_phase),
+        "verification": {"all_passed": False, "results": []},
+        "artifact_dir": str(artifact_dir),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if report is not None:
+        summary["report"] = report
+    _append_history(config, summary)
+    _write_json(artifact_dir / "run.summary.json", summary)
+    return summary
+
+
+def _requeue_running_in_progress_tasks(config: Dict[str, Any]) -> List[StoredTask]:
+    requeued: List[StoredTask] = []
+    for task in list_store_tasks(
+        config,
+        include_completed=True,
+        include_needs_testing=True,
+        include_archived=False,
+    ):
+        if task.phase != "in_progress" or task.last_result_status != "running":
+            continue
+        updated = update_task_phase(
+            config,
+            task.task_id,
+            "ready",
+            artifact_dir=task.artifact_dir,
+            last_result_status="stopped",
+            last_summary=task.last_summary or "Stopped before completion.",
+            last_error="stopped by request",
+        )
+        if updated is not None:
+            requeued.append(updated)
+    return requeued
+
+
 def _request_stop(config: Dict[str, Any]) -> None:
     stop_path = _stop_path(config)
     stop_path.parent.mkdir(parents=True, exist_ok=True)
@@ -827,7 +891,7 @@ def _run_plan_for_task(config: Dict[str, Any],
         "planning",
         [
             "task_id={0}".format(task.task_id),
-            "model={0}".format(planner_model),
+            "model={0}".format(_model_display(config, "planner")),
         ],
     )
     index = build_repo_index(repo_root, config, rebuild=rebuild_index)
@@ -1021,6 +1085,7 @@ def _run_task_once(config: Dict[str, Any],
     history = _read_recent_history(config, task)
     _write_run_snapshot(artifact_dir, task, file_hints, history)
     git_session = capture_git_session_state(repo_root, config)
+    previous_phase = task.phase
 
     active_task = update_task_phase(
         config,
@@ -1033,11 +1098,12 @@ def _run_task_once(config: Dict[str, Any],
     ) or task
 
     if _stop_requested(config):
-        return {
-            "task_id": active_task.task_id,
-            "status": "stopped",
-            "artifact_dir": str(artifact_dir),
-        }
+        return _mark_task_stopped(
+            config,
+            active_task,
+            artifact_dir=artifact_dir,
+            previous_phase=previous_phase,
+        )
 
     _update_runtime(
         config,
@@ -1053,23 +1119,33 @@ def _run_task_once(config: Dict[str, Any],
         "implementing",
         [
             "task_id={0}".format(active_task.task_id),
-            "model={0}".format(implementer_model),
+            "model={0}".format(_model_display(config, "implementer")),
         ],
     )
     implementation_prompt = build_implementation_prompt(repo_root, config, active_task, file_hints, history, dict(active_task.plan))
-    implementation_result = _execute_phase_with_retry(
-        config,
-        repo_root,
-        task=active_task,
-        model=implementer_model,
-        reasoning_effort=_configured_reasoning_effort(config, "implementer"),
-        prompt=implementation_prompt,
-        artifact_dir=artifact_dir,
-        phase_name="implement",
-        output_schema=SCHEMA_ROOT / "report.schema.json",
-        interrupt_state=interrupt_state,
-    )
-    _validate_phase_result("implement", implementation_result)
+    try:
+        implementation_result = _execute_phase_with_retry(
+            config,
+            repo_root,
+            task=active_task,
+            model=implementer_model,
+            reasoning_effort=_configured_reasoning_effort(config, "implementer"),
+            prompt=implementation_prompt,
+            artifact_dir=artifact_dir,
+            phase_name="implement",
+            output_schema=SCHEMA_ROOT / "report.schema.json",
+            interrupt_state=interrupt_state,
+        )
+        _validate_phase_result("implement", implementation_result)
+    except Exception:
+        if _stop_requested(config) or (interrupt_state and interrupt_state.get("requested")):
+            return _mark_task_stopped(
+                config,
+                active_task,
+                artifact_dir=artifact_dir,
+                previous_phase=previous_phase,
+            )
+        raise
     report = implementation_result.parsed_output or {}
     _write_json(artifact_dir / "implement.result.json", report)
     append_task_agent_output(
@@ -1082,12 +1158,13 @@ def _run_task_once(config: Dict[str, Any],
     )
 
     if _stop_requested(config):
-        return {
-            "task_id": active_task.task_id,
-            "status": "stopped",
-            "artifact_dir": str(artifact_dir),
-            "report": report,
-        }
+        return _mark_task_stopped(
+            config,
+            active_task,
+            artifact_dir=artifact_dir,
+            previous_phase=previous_phase,
+            report=report,
+        )
 
     report_status = str(report.get("status", "unknown")).strip() or "unknown"
     requested_mark = str(report.get("mark_task_as", "leave_unchanged")).strip() or "leave_unchanged"
@@ -1408,6 +1485,12 @@ def _cmd_ui(config: Dict[str, Any]) -> int:
 def _cmd_run(config: Dict[str, Any], args: argparse.Namespace) -> int:
     _acquire_runtime_lock(config, "run")
     _clear_stop(config)
+    requeued_tasks = _requeue_running_in_progress_tasks(config)
+    if requeued_tasks:
+        _emit_line(
+            config,
+            "requeued {0} stopped in-progress task(s)".format(len(requeued_tasks)),
+        )
     stop_flag = {"requested": False}
     interrupt_state = {"requested": False}
 

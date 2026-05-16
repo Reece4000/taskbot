@@ -363,6 +363,22 @@ def _terminate_process(process: subprocess.Popen[Any], timeout_seconds: float) -
         return int(process.wait())
 
 
+def _write_command_audit(path: Path,
+                         *,
+                         command: List[str],
+                         phase_name: str,
+                         model: str,
+                         reasoning_effort: str) -> None:
+    payload = {
+        "phase": phase_name,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "command": command,
+        "command_text": shlex.join(command),
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def run_codex_exec(repo_root: Path,
                    config: Dict[str, Any],
                    *,
@@ -382,6 +398,7 @@ def run_codex_exec(repo_root: Path,
     stdout_path = artifact_dir / "{0}.stdout.log".format(phase_name)
     stderr_path = artifact_dir / "{0}.stderr.log".format(phase_name)
     last_message_path = artifact_dir / "{0}.last_message.json".format(phase_name)
+    command_path = artifact_dir / "{0}.command.json".format(phase_name)
 
     codex_config = config["codex"]
     stream_output = bool(codex_config.get("stream_output", True))
@@ -423,6 +440,13 @@ def run_codex_exec(repo_root: Path,
         command.append("--skip-git-repo-check")
     if output_schema is not None:
         command.extend(["--output-schema", str(output_schema)])
+    _write_command_audit(
+        command_path,
+        command=command,
+        phase_name=phase_name,
+        model=model,
+        reasoning_effort=cleaned_reasoning_effort,
+    )
 
     stdout_lines: List[str] = []
     stderr_lines: List[str] = []
